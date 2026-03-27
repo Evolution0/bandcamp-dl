@@ -6,8 +6,12 @@ import logging
 import bs4
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util import create_urllib3_context
-from urllib.parse import urlparse, urlunparse, urljoin
+from urllib.parse import urljoin
+
+try:
+    from urllib3.util import create_urllib3_context
+except ImportError:
+    from urllib3.util.ssl_ import create_urllib3_context
 
 from bandcamp_dl import __version__
 from bandcamp_dl.bandcampjson import BandcampJSON
@@ -24,7 +28,8 @@ class SSLAdapter(HTTPAdapter):
     def proxy_manager_for(self, *args, **kwargs):
         kwargs['ssl_context'] = self.ssl_context
         return super().proxy_manager_for(*args, **kwargs)
-    
+
+
 # Create the SSL context with the custom ciphers
 ctx = create_urllib3_context()
 ctx.load_default_certs()
@@ -57,7 +62,7 @@ class Bandcamp:
         self.soup = None
         self.tracks = None
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
-        
+
         # Mount the adapter with the custom SSL context to the session
         self.session = requests.Session()
         self.adapter = SSLAdapter(ssl_context=ctx)
@@ -84,7 +89,6 @@ class Bandcamp:
             self.logger.debug(" Status code: %s", response.status_code)
             print(f"The Album/Track requested does not exist at: {url}")
             sys.exit(2)
-
 
         try:
             self.soup = bs4.BeautifulSoup(response.text, "lxml")
@@ -132,7 +136,7 @@ class Bandcamp:
                 else:
                     self.logger.debug(f" Could not find position for track: {full_track_url}")
                     track['track_num'] = self.tracks.index(track) + 1
-        
+
         album_release = page_json['album_release_date']
         if album_release is None:
             album_release = page_json['current']['release_date']

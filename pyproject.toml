@@ -20,13 +20,13 @@ classifiers=[
 requires-python = ">=3.4"
 version = "0.0.18"
 dependencies = [
-    "beautifulsoup4 >= 4.13.0b2",
-    "demjson3 >= 3.0.6",
-    "mutagen >= 1.47.0",
-    "requests >= 2.32.3",
-    "unicode-slugify @ git+https://github.com/mozilla/unicode-slugify.git@refs/pull/41/head",
-    "urllib3 >= 2.2.2",
-    "toml ; python_version < '3.11'"
+    "beautifulsoup4==4.10.0",
+    "demjson3==3.0.6",
+    "mutagen==1.43.1",
+    "requests==2.25.1",
+    "unicode-slugify==0.1.5",
+    "urllib3==1.26.20",
+    "toml==0.10.2"
 ]
 
 license = {text = "Unlicense"}
