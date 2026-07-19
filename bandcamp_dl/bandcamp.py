@@ -112,7 +112,10 @@ class Bandcamp:
         track_ids = {}
         if 'track' in page_json and 'itemListElement' in page_json['track']:
             for item in page_json['track']['itemListElement']:
-                track_url = item['item']['@id']
+                track_url = item['item'].get('@id')
+                if track_url is None:
+                    self.logger.warning('Track URL is missing, skipping...')
+                    continue
                 for prop in item['item'].get('additionalProperty', []):
                     if prop.get('name') == 'track_id':
                         track_ids[track_url] = prop.get('value')
