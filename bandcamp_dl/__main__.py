@@ -121,7 +121,7 @@ def main():
             continue
         logger.debug("\n\tURL: %s", url)
         album_list.append(bandcamp.parse(url, not arguments.no_art, arguments.embed_lyrics, arguments.embed_genres,
-                                         arguments.debug, arguments.cover_quality))
+                                         arguments.cover_quality))
 
     for album in album_list:
         logger.debug(f" Album data:\n\t{album}")

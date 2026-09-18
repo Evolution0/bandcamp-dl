@@ -52,13 +52,19 @@ DEFAULT_CIPHERS = ":".join(
 ctx.set_ciphers(DEFAULT_CIPHERS)
 
 class Bandcamp:
-    def __init__(self, limit_req_per_minute: int = 0):
+    """Core parsing logic"""
+    def __init__(self, limit_req_per_minute: int = 0, debugging: bool = False):
+        """
+        :param limit_req_per_minute: Limit the number of requests to Bandcamp's servers
+        :param debugging: Toggle verbose logging
+        """
         self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
                         f'(https://github.com/evolution0/bandcamp-dl)'}
         self.soup = None
         self.tracks = None
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
-        
+        self.debugging = debugging
+        self.logger.disabled = not debugging
         self.session = requests.Session()
         # Mount the adapter with the custom SSL context to the session
         self.ssl_adapter = SSLAdapter(ssl_context=ctx)
@@ -72,14 +78,14 @@ class Bandcamp:
             self.rate_adapter = None
 
     def parse(self, url: str, art: bool = True, lyrics: bool = False, genres: bool = False,
-              debugging: bool = False, cover_quality: int = 0) -> dict or None:
+              cover_quality: int = 0) -> dict | None:
         """Requests the page, cherry-picks album info
 
         :param url: album/track url
         :param art: if True download album art
         :param lyrics: if True fetch track lyrics
         :param genres: if True fetch track tags
-        :param debugging: if True then verbose output
+        :param cover_quality: Cover image quality, 0 being source, 10 (1200x1200), 16 (700x700), defaults to 0
         :return: album metadata
         """
 
@@ -100,7 +106,7 @@ class Bandcamp:
             self.soup = bs4.BeautifulSoup(response.text, "html.parser")
 
         self.logger.debug(" Generating BandcampJSON..")
-        bandcamp_json = BandcampJSON(self.soup, debugging).generate()
+        bandcamp_json = BandcampJSON(self.soup, self.debugging).generate()
         page_json = {}
         for entry in bandcamp_json:
             page_json = {**page_json, **json.loads(entry)}
@@ -252,7 +258,7 @@ class Bandcamp:
                 return False
         return True
 
-    def get_track_metadata(self, track: dict or None) -> dict:
+    def get_track_metadata(self, track: dict | None) -> dict:
         """Extract individual track metadata
 
         :param track: track dict
@@ -292,9 +298,9 @@ class Bandcamp:
         :param page_type: Type of page album/track
         :return: url as str
         """
-        return f"http://{artist}.bandcamp.com/{page_type}/{slug}"
+        return f"https://{artist}.bandcamp.com/{page_type}/{slug}"
 
-    def get_album_art(self, quality: int = 0) -> str:
+    def get_album_art(self, quality: int = 0) -> str | None:
         """Find and retrieve album art url from page
 
         :param quality: The quality of the album art to retrieve

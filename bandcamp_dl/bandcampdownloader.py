@@ -3,8 +3,8 @@ import os
 import re
 import shutil
 
-from mutagen import mp3
-from mutagen import id3
+from mutagen.mp3 import MP3
+from mutagen.id3 import ID3, TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC, TDOR, TDRL
 import requests
 from  requests_ratelimiter import LimiterAdapter
 import slugify
@@ -19,7 +19,7 @@ def print_clean(msg):
 
 
 class BandcampDownloader:
-    def __init__(self, config, urls=None):
+    def __init__(self, config, urls=None, debugging: bool = False):
         """Initialize variables we will need throughout the Class
 
         :param config: user config/args
@@ -37,12 +37,17 @@ class BandcampDownloader:
             self.rate_adapter = None
 
         self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
+        self.logger.disabled = not debugging
 
         if type(urls) is str:
             self.urls = [urls]
 
         self.config = config
         self.urls = urls
+
+        self.album_art = None
+        self.track_num = None
+        self.num_tracks = None
 
     def start(self, album: dict):
         """Start album download process
@@ -56,11 +61,13 @@ class BandcampDownloader:
             if choice == "yes" or choice == "y":
                 print("Starting download process.")
                 self.download_album(album)
+                return None
             else:
                 print("Cancelling download process.")
                 return None
         else:
             self.download_album(album)
+            return None
 
     def template_to_path(self, track: dict, ascii_only, ok_chars, space_char, keep_space,
                          case_mode) -> str:
@@ -163,10 +170,10 @@ class BandcampDownloader:
 
             path_meta = track_meta.copy()
 
-            if self.config.truncate_album > 0 and len(path_meta['album']) > self.config.truncate_album:
+            if 0 < self.config.truncate_album < len(path_meta['album']):
                 path_meta['album'] = path_meta['album'][:self.config.truncate_album]
 
-            if self.config.truncate_track > 0 and len(path_meta['title']) > self.config.truncate_track:
+            if 0 < self.config.truncate_track < len(path_meta['title']):
                 path_meta['title'] = path_meta['title'][:self.config.truncate_track]
 
             self.num_tracks = len(album['tracks'])
@@ -245,7 +252,7 @@ class BandcampDownloader:
                     print(e)
                     print("Downloading failed..")
                     return False
-            if skip is False:
+            if not skip:
                 self.write_id3_tags(filepath, track_meta)
 
         if os.path.isfile(f"{self.config.base_dir}/{__version__}.not.finished"):
@@ -271,43 +278,41 @@ class BandcampDownloader:
             print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] '
                         f':: Encoding: {filename}')
 
-        audio = mp3.MP3(filepath)
-        audio.delete()
-        audio["TIT2"] = id3._frames.TIT2(encoding=3, text=["title"])
-        audio["WOAF"] = id3._frames.WOAF(url=meta["url"])
-        audio.save(filename=None, v1=2)
+        audio = MP3(filepath)
+        if audio.tags is None:
+            audio.add_tags()
 
-        audio = mp3.MP3(filepath)
+        audio.tags.add(WOAF(encoding=3, url=meta["url"]))
+
         if self.config.group and 'label' in meta:
-            audio["TIT1"] = id3._frames.TIT1(encoding=3, text=meta["label"])
+            audio.tags.add(TIT1(encoding=3, text=meta["label"]))
 
         if self.config.embed_lyrics:
-            audio["USLT"] = id3._frames.USLT(encoding=3, lang='eng', desc='', text=meta['lyrics'])
+            audio.tags.add(USLT(encoding=3, lang='eng', desc='', text=meta['lyrics']))
 
         if self.config.embed_art:
             with open(self.album_art, 'rb') as cover_img:
                 cover_bytes = cover_img.read()
-                audio["APIC"] = id3._frames.APIC(encoding=3, mime='image/jpeg', type=3,
-                                                 desc='Cover', data=cover_bytes)
-        if self.config.embed_genres:
-            audio["TCON"] = id3._frames.TCON(encoding=3, text=meta['genres'])
-        audio.save()
+                audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes))
 
-        audio = mp3.EasyMP3(filepath)
+        if self.config.embed_genres:
+            audio.tags.add(TCON(encoding=3, text=meta['genres']))
 
         if meta['track'].isdigit():
-            audio["tracknumber"] = meta['track']
+            audio.tags.add(TRCK(encoding=3, text=meta['track']))
         else:
-            audio["tracknumber"] = '1'
+            audio.tags.add(TRCK(encoding=3, text=1))
 
         if meta['artist'] is not None:
-            audio["artist"] = meta['artist']
+            audio.tags.add(TPE1(encoding=3, text=meta['artist']))
         else:
-            audio["artist"] = meta['albumartist']
-        audio["title"] = meta["title"]
-        audio["albumartist"] = meta['albumartist']
-        audio["album"] = meta['album']
-        audio["date"] = meta["date"]
+            audio.tags.add(TPE1(encoding=3, text=meta['albumartist']))
+
+        audio.tags.add(TIT2(encoding=3, text=meta["title"]))
+        audio.tags.add(TPE2(encoding=3, text=meta['albumartist']))
+        audio.tags.add(TALB(encoding=3, text=meta['album']))
+        # We don't currently separate recording date from release date
+        audio.tags.add(TDRC(encoding=3, text=meta["date"]))
         audio.save()
 
         self.logger.debug(" Encoding process finished..")
@@ -315,7 +320,7 @@ class BandcampDownloader:
 
         try:
             os.rename(filepath, filepath[:-4])
-        except WindowsError:
+        except OSError:
             os.remove(filepath[:-4])
             os.rename(filepath, filepath[:-4])
 
