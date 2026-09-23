@@ -37,7 +37,7 @@ class BandcampDownloader:
             self.rate_adapter = None
 
         self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
-        self.logger.disabled = not debugging
+        self.logger.disabled = debugging
 
         if type(urls) is str:
             self.urls = [urls]
@@ -301,7 +301,7 @@ class BandcampDownloader:
         if meta['track'].isdigit():
             audio.tags.add(TRCK(encoding=3, text=meta['track']))
         else:
-            audio.tags.add(TRCK(encoding=3, text=1))
+            audio.tags.add(TRCK(encoding=3, text="1"))
 
         if meta['artist'] is not None:
             audio.tags.add(TPE1(encoding=3, text=meta['artist']))

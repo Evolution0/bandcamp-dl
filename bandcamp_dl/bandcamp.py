@@ -64,7 +64,7 @@ class Bandcamp:
         self.tracks = None
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
         self.debugging = debugging
-        self.logger.disabled = not debugging
+        self.logger.disabled = debugging
         self.session = requests.Session()
         # Mount the adapter with the custom SSL context to the session
         self.ssl_adapter = SSLAdapter(ssl_context=ctx)
@@ -312,10 +312,10 @@ class Bandcamp:
         except None:
             pass
 
-    def get_full_discography(self, artist: str, page_type: str) -> list:
-        """Generate a list of album and track urls based on the artist name
+    def get_full_discography(self, name: str, page_type: str) -> list:
+        """Generate a list of album and track urls based on the artist/label name
 
-        :param artist: artist name
+        :param name: artist/label name
         :param page_type: Type of page, it should be music but it's a parameter so it's not
                           hardcoded
         :return: urls as list of strs
@@ -323,13 +323,14 @@ class Bandcamp:
 
         album_urls = set()
 
-        music_page_url = f"https://{artist}.bandcamp.com/{page_type}"
+        print(f"Found artist page, fetching full discography for: {name}")
+        music_page_url = f"https://{name}.bandcamp.com/{page_type}"
         self.logger.info(f"Scraping discography from: {music_page_url}")
 
         try:
             response = self.session.get(music_page_url, headers=self.headers)
         except requests.exceptions.RequestException as e:
-            self.logger.error(f"Could not fetch artist page {music_page_url}: {e}")
+            self.logger.error(f"Could not fetch artist/label page {music_page_url}: {e}")
             return []
 
         try:
@@ -340,26 +341,43 @@ class Bandcamp:
         music_grid = soup.find('ol', {'id': 'music-grid'})
         if not music_grid:
             self.logger.warning("Could not find music grid on the page. No albums found.")
-            return []
 
-        if 'data-client-items' in music_grid.attrs:
-            self.logger.debug("Found data-client-items attribute. Parsing for album URLs.")
-            try:
-                json_string = bs4.BeautifulSoup(music_grid['data-client-items'], "html.parser").text
-                items = json.loads(json_string)
-                for item in items:
-                    if 'page_url' in item:
-                        full_url = urljoin(music_page_url, item['page_url'])
-                        album_urls.add(full_url)
-            except (json.JSONDecodeError, TypeError) as e:
-                self.logger.error(f"Failed to parse data-client-items JSON: {e}")
-
+        try:
+            if 'data-client-items' in music_grid.attrs:
+                self.logger.debug("Found data-client-items attribute. Parsing for album URLs.")
+                try:
+                    json_string = bs4.BeautifulSoup(music_grid['data-client-items'], "html.parser").text
+                    items = json.loads(json_string)
+                    for item in items:
+                        if 'page_url' in item:
+                            full_url = urljoin(music_page_url, item['page_url'])
+                            album_urls.add(full_url)
+                except (json.JSONDecodeError, TypeError) as e:
+                    self.logger.error(f"Failed to parse data-client-items JSON: {e}")
+        except AttributeError:
+            self.logger.warning("Retrying as a Label page.")
+            is_label = soup.find('script', {'id': 'band-menuitem-template'})
+            if is_label:
+                music_grid = soup.select('div.ipCellLabel1 a')
+                for a in music_grid:
+                    href = a.get('href')
+                    if href:
+                        # Only need this for truncated links, some are already complete so first verify.
+                        if 'http' in href:
+                            if not '-disabled-' in href:
+                                album_urls.add(href)
+                        else:
+                            full_url = urljoin(music_page_url, href)
+                            album_urls.add(full_url)
+            else:
+                return []
+        """
         self.logger.debug("Scraping all <li> elements in the music grid for links.")
         for a in music_grid.select('li.music-grid-item a'):
             href = a.get('href')
             if href:
                 full_url = urljoin(music_page_url, href)
                 album_urls.add(full_url)
-
+        """
         self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
         return list(album_urls)

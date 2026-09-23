@@ -107,9 +107,8 @@ def main():
         for url in arguments.URL:
             parsed_url = urlparse(url)
             if parsed_url.netloc.endswith('.bandcamp.com') and (parsed_url.path == '/music' or parsed_url.path == '/' or parsed_url.path == ''):
-                artist = parsed_url.netloc.split('.')[0]
-                print(f"Found artist page, fetching full discography for: {artist}")
-                urls.extend(bandcamp.get_full_discography(artist, "music"))
+                name = parsed_url.netloc.split('.')[0]
+                urls.extend(bandcamp.get_full_discography(name, "music"))
             else:
                 urls.append(url)
 
