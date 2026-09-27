@@ -24,7 +24,7 @@ A clear and concise description of what you expected to happen.
 Most if not always you will get some kind of output explaining the issue, post it:
 ```
 HERE
-``
+```
 If possible after running the command with the --debug option.
 
 **Desktop (please complete the following information):**
