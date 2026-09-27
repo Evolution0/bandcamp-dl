@@ -56,7 +56,7 @@ class BandcampDownloader:
         """
 
         if not album['full'] and not self.config.no_confirm:
-            choice = input("Track list incomplete, some tracks may be private, download anyway? "
+            choice = input(f"Track list for {album['title']} incomplete, some tracks may be private, download anyway? "
                            "(yes/no): ").lower()
             if choice == "yes" or choice == "y":
                 print("Starting download process.")
@@ -105,7 +105,7 @@ class BandcampDownloader:
                 key = 'albumartist'
 
             if key == 'artist' and track.get('artist') is None:
-                self.logger.debug('Track artist is None, replacing with album artist')                
+                self.logger.debug(' Track artist is None, replacing with album artist')
                 track['artist'] = track.get('albumartist')
 
             if self.config.untitled_path_from_slug and token == 'album' and track['album'].lower() == 'untitled':

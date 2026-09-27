@@ -2,6 +2,7 @@ import argparse
 import logging
 import pathlib
 import sys
+import pprint
 
 from bandcamp_dl import __version__
 from bandcamp_dl.bandcamp import Bandcamp
@@ -76,14 +77,19 @@ def main():
         return
 
     if arguments.debug:
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="{asctime} [{levelname}] <{module}>:\n\t{message}",
+            datefmt="%H:%M:%S",
+            style="{"
+        )
     else:
         logging.basicConfig()
     logging_handle = "bandcamp-dl"
     logger = logging.getLogger(logging_handle)
 
     # TODO: Its possible to break bandcamp-dl temporarily by simply erasing a line in the config, catch this and warn.
-    logger.debug(f"Config/Args: {arguments}")
+    logger.debug(f"Config/Args: {pprint.pformat(arguments, indent=1)}")
     if not arguments.URL and not arguments.artist:
         parser.print_usage()
         sys.stderr.write(f"{pathlib.Path(sys.argv[0]).name}: error: the following arguments are "
@@ -123,9 +129,10 @@ def main():
                                          arguments.cover_quality))
 
     for album in album_list:
-        logger.debug(f" Album data:\n\t{album}")
+        logger.debug(f"Album data:\n\t{album}")
+        logger.debug("Pruning incomplete albums..")
         if arguments.full_album and not album['full']:
-            print("Full album not available. Skipping ", album['title'], " ...")
+            print(f"Full album not available. Skipping {album['title']} ...")
             # Remove not-full albums BUT continue with the rest of the albums.
             album_list.remove(album)
 

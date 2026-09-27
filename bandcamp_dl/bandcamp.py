@@ -364,6 +364,7 @@ class Bandcamp:
                     if href:
                         # Only need this for truncated links, some are already complete so first verify.
                         if 'http' in href:
+                            # Apparently artists that are deleted/disabled have these modified links?
                             if not '-disabled-' in href:
                                 album_urls.add(href)
                         else:
