@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=69.0.0", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -15,22 +15,27 @@ classifiers=[
         'Intended Audience :: End Users/Desktop',
         'Topic :: Multimedia :: Sound/Audio',
         'License :: Public Domain',
-        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.13',
 ]
-requires-python = ">=3.4"
-version = "0.0.18"
+requires-python = ">=3.13"
+version = "1.0.0.dev1"
 dependencies = [
-    "beautifulsoup4 >= 4.13.0b2",
+    "beautifulsoup4 >= 4.15.0",
     "demjson3 >= 3.0.6",
-    "mutagen >= 1.47.0",
-    "requests >= 2.32.3",
+    "mutagen >= 1.48.1",
+    "requests >= 2.34.2",
     "unicode-slugify @ git+https://github.com/mozilla/unicode-slugify.git@refs/pull/41/head",
-    "urllib3 >= 2.2.2",
-    "toml ; python_version < '3.11'",
-    "requests-ratelimiter >= 0.7.0",
+    "urllib3 >= 2.8.0",
+    "requests-ratelimiter >= 0.10.0",
 ]
 
 license = {text = "Unlicense"}
+
+[project.optional-dependencies]
+test = [
+    "pytest >= 9.1.1",
+    "responses >= 0.26.3"
+]
 
 [project.scripts]
 bandcamp-dl = "bandcamp_dl.__main__:main"

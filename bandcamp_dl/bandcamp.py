@@ -355,6 +355,7 @@ class Bandcamp:
                 except (json.JSONDecodeError, TypeError) as e:
                     self.logger.error(f"Failed to parse data-client-items JSON: {e}")
         except AttributeError:
+            # This is slow for some reason, needs work
             self.logger.warning("Retrying as a Label page.")
             is_label = soup.find('script', {'id': 'band-menuitem-template'})
             if is_label:
