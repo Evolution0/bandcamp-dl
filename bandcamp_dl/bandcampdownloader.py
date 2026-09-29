@@ -81,6 +81,8 @@ class BandcampDownloader:
         :param space_char: char to use in place of spaces
         :return: filepath
         """
+        # TODO: Allow overriding most of this in the case of a Playlist with a arg
+
         self.logger.debug(" Generating filepath/trackname..")
         path = self.config.template
         self.logger.debug(f"\n\tTemplate: {path}")

@@ -383,3 +383,42 @@ class Bandcamp:
         """
         self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
         return list(album_urls)
+
+    def get_playlist(self, playlist_url: str) -> list:
+        playlist = self.session.get(playlist_url, headers=self.headers)
+        try:
+            playlist_soup = bs4.BeautifulSoup(playlist.text, "lxml")
+        except bs4.FeatureNotFound:
+            playlist_soup = bs4.BeautifulSoup(playlist.text, "html.parser")
+        self.logger.debug(" Generating playlist JSON..")
+        playlist = BandcampJSON(playlist_soup, self.debugging, 'playlist').generate()
+        playlist_json = json.loads(playlist)
+        track_count = playlist_json['appData']['tracklist']['tracksSummary']['totalCount']
+        playlist_tracks = [track['url'] for track in playlist_json['appData']['tracklist']['tracks']]
+        if track_count > 50:
+            self.logger.debug(f"Track count is > 50, requesting full track list via API.")
+            playlist_cursor = 49
+            playlist_id = playlist_json['appData']['playlistId']
+            while playlist_cursor:
+                playlist_payload = {
+                    'item_id': playlist_id,
+                    'item_type': "playlist",
+                    'next_cursor': playlist_cursor
+                }
+                playlist_response = self.session.post("https://bandcamp.com/api/player/2/player_data_web", headers=self.headers, json=playlist_payload)
+                playlist_json = json.loads(playlist_response.text)
+                self.logger.debug(f"Tracks fetched: {playlist_cursor}")
+                playlist_cursor = playlist_json['tracklist']['nextCursor']
+                playlist_tracks += [track['url'] for track in playlist_json['tracklist']['tracks']]
+            self.logger.debug(f"Tracks fetched: {track_count}")
+            self.logger.debug("Full tracklist fetched, proceeding to download.")
+        else:
+            self.logger.debug(f"Track count is <= 50, skipping API requests.")
+        # Check for disabled accounts and purge them from the list as downloading will fail
+        purged_playlist = []
+        for track in playlist_tracks:
+            if '-disabled-' in track:
+                self.logger.debug(f"Removing {track} from download queue as the account has been disabled")
+            else:
+                purged_playlist.append(track)
+        return purged_playlist

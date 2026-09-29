@@ -102,22 +102,38 @@ def main():
             setattr(arguments, arg, val)
     bandcamp = Bandcamp(limit_req_per_minute=arguments.limit_req_per_minute)
 
+    # TODO:
+    #   Identify page type, determine download method, proceed.
+    #   Multi-album/track pages: Artist, Label, Playlist
+    #   Single Album/Track pages: Album, Track
+    #   Videos are also possible
+    #   Its possible for multiple URLs to be passed, some might be artists, labels, tracks, even playlists
+    #   First determine if its a single url before moving on, otherwise loop through and process them in the if/else
+
     if arguments.artist and arguments.album:
+        logger.debug(f"Specified an album for download: {arguments.artist} - {arguments.album}")
         urls = Bandcamp.generate_album_url(arguments.artist, arguments.album, "album")
     elif arguments.artist and arguments.track:
+        logger.debug(f"Specified a track for download: {arguments.artist} - {arguments.track}")
         urls = Bandcamp.generate_album_url(arguments.artist, arguments.track, "track")
     elif arguments.artist:
+        logger.debug(f"Specified an artist, downloading discography for: {arguments.artist}")
         urls = Bandcamp.get_full_discography(bandcamp, arguments.artist, "music")
     else:
+        # This is where we process URL(s)
+        logger.debug(f"Specified a URL or URLs, determining type..")
         urls = []
         for url in arguments.URL:
             parsed_url = urlparse(url)
             if parsed_url.netloc.endswith('.bandcamp.com') and (parsed_url.path == '/music' or parsed_url.path == '/' or parsed_url.path == ''):
                 name = parsed_url.netloc.split('.')[0]
+                logger.debug(f"Specified an artist or label, downloading discography for: {name}")
                 urls.extend(bandcamp.get_full_discography(name, "music"))
+            elif '/playlist/' in parsed_url.path:
+                logger.debug(f"Specified a playlist, fetching tracklist for: {parsed_url.path}")
+                urls = Bandcamp.get_playlist(bandcamp, arguments.URL[0])
             else:
                 urls.append(url)
-
 
     album_list = []
 
