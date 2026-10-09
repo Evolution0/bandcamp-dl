@@ -4,7 +4,7 @@ import tomllib
 
 
 try:
-    __version__ = importlib.metadata.version("bandcamp-downloader")
+    __version__ = importlib.metadata.version("bandcamp-dl")
 except importlib.metadata.PackageNotFoundError:
     # If running in a development environment we ideally are not installed in the venv as such fetch from pyproject.toml
     here = pathlib.Path(__file__).parent.parent.resolve()
