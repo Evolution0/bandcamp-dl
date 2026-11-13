@@ -49,3 +49,10 @@ Version 0.0.8
   available)
 - [Enhancement] --track option for downloading individual tracks and
   singles.
+
+Unreleased
+----------
+- [Bugfix] Artists whose pages redirect forever between
+  ``name.bandcamp.com`` and a broken custom domain (``TooManyRedirects``)
+  now download through Bandcamp's mobile API instead. Lyrics are not
+  available on this path.
