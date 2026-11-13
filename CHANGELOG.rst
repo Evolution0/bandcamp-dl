@@ -60,3 +60,6 @@ Unreleased
   (HTTP 429). A page that still fails is reported with its HTTP status
   instead of "does not exist", and a failed artist/label page exits with
   code 2 instead of silently finding no albums.
+- [Bugfix] Artist pages that list releases only as music grid links (no
+  ``data-client-items``) no longer return an empty discography. Grid links
+  and ``data-client-items`` are now combined.

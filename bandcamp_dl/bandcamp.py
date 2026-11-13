@@ -396,6 +396,12 @@ class Bandcamp:
                             album_urls.add(full_url)
                 except (json.JSONDecodeError, TypeError) as e:
                     self.logger.error(f"Failed to parse data-client-items JSON: {e}")
+            # Releases can be listed as grid links, in data-client-items, or both
+            self.logger.debug("Scraping all <li> elements in the music grid for links.")
+            for a in music_grid.select('li.music-grid-item a'):
+                href = a.get('href')
+                if href:
+                    album_urls.add(urljoin(music_page_url, href))
         except AttributeError:
             # This is slow for some reason, needs work
             self.logger.warning("Retrying as a Label page.")
@@ -415,14 +421,6 @@ class Bandcamp:
                             album_urls.add(full_url)
             else:
                 return []
-        """
-        self.logger.debug("Scraping all <li> elements in the music grid for links.")
-        for a in music_grid.select('li.music-grid-item a'):
-            href = a.get('href')
-            if href:
-                full_url = urljoin(music_page_url, href)
-                album_urls.add(full_url)
-        """
         self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
         return list(album_urls)
 
