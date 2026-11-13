@@ -79,6 +79,8 @@ Options
       --base-dir BASE_DIR   Base location of which all files are downloaded
       -f, --full-album      Download only if all tracks are available
       -o, --overwrite       Overwrite tracks that already exist. Default is False.
+      --retag               Rewrite the tags of tracks that already exist instead of skipping them,
+                            without downloading them again. Default is False.
       -n, --no-art          Skip grabbing album art
       -e, --embed-lyrics    Embed track lyrics (If available)
       -g, --group           Use album/track Label as iTunes grouping

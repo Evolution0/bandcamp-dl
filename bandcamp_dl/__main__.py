@@ -32,6 +32,10 @@ def main():
     parser.add_argument('-o', '--overwrite', action='store_true',
                         help=f'Overwrite tracks that already exist. Default is {conf.overwrite}.',
                         default=conf.overwrite)
+    parser.add_argument('--retag', action='store_true',
+                        help='Rewrite the tags of tracks that already exist instead of skipping '
+                             f'them, without downloading them again. Default is {conf.retag}.',
+                        default=conf.retag)
     parser.add_argument('-n', '--no-art', help='Skip grabbing album art', action='store_true',
                         default=conf.no_art)
     parser.add_argument('-e', '--embed-lyrics', help='Embed track lyrics (If available)',

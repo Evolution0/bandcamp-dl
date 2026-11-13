@@ -72,3 +72,6 @@ Unreleased
   mount reported it missing.
 - [Bugfix] ``--embed-art`` no longer crashes with ``TypeError`` on albums
   that have no cover art.
+- [Enhancement] ``--retag`` rewrites the tags of tracks that already exist
+  (for example to add genres with ``--embed-genres``) without downloading
+  them again.
