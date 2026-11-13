@@ -143,9 +143,10 @@ class BandcampDownloader:
         """
         directory = os.path.dirname(filename)
         self.logger.debug(f" Directory:\n\t{directory}")
-        self.logger.debug(" Directory doesn't exist, creating..")
-        if not os.path.exists(directory):
-            os.makedirs(directory)
+        self.logger.debug(" Creating directory if it doesn't exist..")
+        # exist_ok rather than an exists() check: on flaky network mounts exists() can
+        # report False for a folder that is there
+        os.makedirs(directory, exist_ok=True)
 
         return directory
 

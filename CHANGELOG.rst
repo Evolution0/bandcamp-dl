@@ -67,3 +67,6 @@ Unreleased
   empty or partial leftover ``.mp3.tmp`` file is redownloaded instead of
   tagged. Both caused ``HeaderNotFoundError: can't sync to MPEG frame``.
   Failed downloads now give up after 3 attempts instead of retrying forever.
+- [Bugfix] Creating an album folder no longer fails with
+  ``FileExistsError`` when the folder already exists but a flaky network
+  mount reported it missing.
