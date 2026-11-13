@@ -55,6 +55,7 @@ ctx.set_ciphers(DEFAULT_CIPHERS)
 MOBILE_API = "https://bandcamp.com/api/mobile/24"
 SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 API_RETRIES = 5
+PAGE_RETRIES = 5
 
 class Bandcamp:
     """Core parsing logic"""
@@ -100,7 +101,7 @@ class Bandcamp:
             return self.parse_api_tralbum(self.api_tralbums[url], url, art, genres, cover_quality)
 
         try:
-            response = self.session.get(url, headers=self.headers)
+            response = self.get_page(url)
         except requests.exceptions.MissingSchema:
             return None
         except requests.exceptions.TooManyRedirects:
@@ -108,7 +109,10 @@ class Bandcamp:
 
         if not response.ok:
             self.logger.debug(" Status code: %s", response.status_code)
-            print(f"The Album/Track requested does not exist at: {url}")
+            if response.status_code == 404:
+                print(f"The Album/Track requested does not exist at: {url}")
+            else:
+                print(f"Could not fetch {url}: HTTP {response.status_code}")
             sys.exit(2)
 
 
@@ -245,9 +249,26 @@ class Bandcamp:
 
         return album
 
+    def get_page(self, url: str) -> requests.Response:
+        """GET a page, waiting and retrying while Bandcamp rate limits us (HTTP 429)
+
+        :param url: page url
+        :return: the last response, which may still be an error
+        """
+        for attempt in range(PAGE_RETRIES):
+            response = self.session.get(url, headers=self.headers)
+            if response.status_code != 429:
+                break
+            # Retry-After may be missing or an HTTP date; back off exponentially then
+            retry_after = response.headers.get('Retry-After', '')
+            delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+            print(f"Rate limited by Bandcamp, retrying in {delay}s..")
+            time.sleep(delay)
+        return response
+
     def get_track_lyrics(self, track_url):
         self.logger.debug(" Fetching track lyrics..")
-        track_page = self.session.get(track_url, headers=self.headers)
+        track_page = self.get_page(track_url)
         try:
             track_soup = bs4.BeautifulSoup(track_page.text, "lxml")
         except bs4.FeatureNotFound:
@@ -340,7 +361,7 @@ class Bandcamp:
         self.logger.info(f"Scraping discography from: {music_page_url}")
 
         try:
-            response = self.session.get(music_page_url, headers=self.headers)
+            response = self.get_page(music_page_url)
         except requests.exceptions.TooManyRedirects:
             self.logger.warning(f"{music_page_url} is stuck in a redirect loop, "
                                 f"falling back to Bandcamp's mobile API")
@@ -348,6 +369,11 @@ class Bandcamp:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Could not fetch artist/label page {music_page_url}: {e}")
             return []
+
+        if not response.ok:
+            # Fail loudly: an error page has no music grid and would look like an empty discography
+            print(f"Could not fetch {music_page_url}: HTTP {response.status_code}")
+            sys.exit(2)
 
         try:
             soup = bs4.BeautifulSoup(response.text, "lxml")
@@ -515,7 +541,7 @@ class Bandcamp:
         }
 
     def get_playlist(self, playlist_url: str) -> list:
-        playlist = self.session.get(playlist_url, headers=self.headers)
+        playlist = self.get_page(playlist_url)
         try:
             playlist_soup = bs4.BeautifulSoup(playlist.text, "lxml")
         except bs4.FeatureNotFound:

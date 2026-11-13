@@ -56,3 +56,7 @@ Unreleased
   ``name.bandcamp.com`` and a broken custom domain (``TooManyRedirects``)
   now download through Bandcamp's mobile API instead. Lyrics are not
   available on this path.
+- [Bugfix] Page requests now wait and retry when Bandcamp rate limits them
+  (HTTP 429). A page that still fails is reported with its HTTP status
+  instead of "does not exist", and a failed artist/label page exits with
+  code 2 instead of silently finding no albums.
