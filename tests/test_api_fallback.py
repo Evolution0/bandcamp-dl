@@ -93,6 +93,16 @@ def test_api_request_retries_after_rate_limit():
 
 
 @responses.activate
+def test_band_on_lookalike_domain_is_not_matched():
+    add_redirect_loop("loopy")
+    responses.add(responses.POST, SEARCH_API, json={"auto": {"results": [
+        {"type": "b", "id": 666, "item_url_root": "https://loopy.evil.example"},
+    ]}})
+
+    assert Bandcamp().find_band_id("loopy") is None
+
+
+@responses.activate
 def test_discography_returns_empty_when_band_not_found():
     add_redirect_loop("loopy")
     responses.add(responses.POST, SEARCH_API, json={"auto": {"results": []}})

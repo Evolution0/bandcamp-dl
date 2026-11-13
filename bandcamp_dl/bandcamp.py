@@ -422,13 +422,19 @@ class Bandcamp:
         :param name: artist/label subdomain name
         :return: band ID, or None if no matching band was found
         """
+        hosts = {f"{name}.bandcamp.com"}
+        # Search results list custom-domain artists under that domain, so also trust
+        # exactly the host that name.bandcamp.com redirects to
+        location = self.session.request("GET", f"https://{name}.bandcamp.com/",
+                                        headers=self.headers,
+                                        allow_redirects=False).headers.get('Location')
+        if location:
+            hosts.add(urlparse(location).netloc)
         results = self.api_request("POST", SEARCH_API, json={
             "search_text": name, "search_filter": "", "full_page": False})
         for result in results.get('auto', {}).get('results', []):
             host = urlparse(result.get('item_url_root', '')).netloc
-            # shortcut: a custom domain only matches when its first label equals the
-            # subdomain name; widen the match if real artists turn up that miss it
-            if result.get('type') == 'b' and host.split('.')[0] == name:
+            if result.get('type') == 'b' and host in hosts:
                 return result['id']
         return None
 
@@ -473,10 +479,11 @@ class Bandcamp:
         """Parse an album/track whose web page redirect-loops, through the mobile API"""
         self.logger.warning(f"{url} is stuck in a redirect loop, falling back to Bandcamp's mobile API")
         parsed_url = urlparse(url)
-        self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path)
-        for api_url, tralbum in self.api_tralbums.items():
+        # Only look at this band's releases; the cache may hold other bands' too
+        for api_url in self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path):
             if urlparse(api_url).path == parsed_url.path:
-                return self.parse_api_tralbum(tralbum, url, art, genres, cover_quality)
+                return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, genres,
+                                              cover_quality)
         print(f"The Album/Track requested does not exist at: {url}")
         sys.exit(2)
 
