@@ -264,7 +264,8 @@ class BandcampDownloader:
             os.remove(f"{self.config.base_dir}/{__version__}.not.finished")
 
         # Remove album art image as it is embedded
-        if self.config.embed_art and hasattr(self, "album_art"):
+        # album_art stays None when the album has no cover
+        if self.config.embed_art and self.album_art:
             os.remove(self.album_art)
 
         return True
@@ -295,7 +296,7 @@ class BandcampDownloader:
         if self.config.embed_lyrics:
             audio.tags.add(USLT(encoding=3, lang='eng', desc='', text=meta['lyrics']))
 
-        if self.config.embed_art:
+        if self.config.embed_art and self.album_art:
             with open(self.album_art, 'rb') as cover_img:
                 cover_bytes = cover_img.read()
                 audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes))

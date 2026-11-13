@@ -70,3 +70,5 @@ Unreleased
 - [Bugfix] Creating an album folder no longer fails with
   ``FileExistsError`` when the folder already exists but a flaky network
   mount reported it missing.
+- [Bugfix] ``--embed-art`` no longer crashes with ``TypeError`` on albums
+  that have no cover art.
