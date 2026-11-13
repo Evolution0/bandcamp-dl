@@ -211,8 +211,12 @@ class BandcampDownloader:
                     r = self.session.get(track['url'], headers=self.headers, stream=True)
                     file_length = int(r.headers.get('content-length', 0))
                     total = int(file_length / 100)
-                    # If file exists and is still a tmp file skip downloading and encode
-                    if os.path.exists(filepath):
+                    if not r.ok:
+                        # Never save an error page as audio, mutagen can't read it
+                        print(f"{filename[:-4]} failed with HTTP {r.status_code}, retrying..")
+                    # A leftover tmp file is only safe to encode if its download had finished
+                    elif os.path.exists(filepath) and file_length and \
+                            os.path.getsize(filepath) == file_length:
                         self.write_id3_tags(filepath, track_meta)
                         # Set skip to True so that we don't try encoding again
                         skip = True
@@ -222,33 +226,31 @@ class BandcampDownloader:
                         print(f"File: {filename[:-4]} already exists and is complete, skipping..")
                         skip = True
                         break
-                    with open(filepath, "wb") as f:
-                        if file_length is None:
-                            f.write(r.content)
-                        else:
+                    else:
+                        with open(filepath, "wb") as f:
                             dl = 0
-                            for data in r.iter_content(chunk_size=total):
+                            for data in r.iter_content(chunk_size=total or 8192):
                                 dl += len(data)
                                 f.write(data)
                                 if not self.config.debug:
-                                    done = int(50 * dl / file_length)
+                                    done = int(50 * dl / file_length) if file_length else 0
                                     print_clean(f'\r({self.track_num}/{self.num_tracks}) '
                                                 f'[{"=" * done}{" " * (50 - done)}] :: '
                                                 f'Downloading: {filename[:-8]}')
-                    local_size = os.path.getsize(filepath)
-                    # if the local filesize before encoding doesn't match the remote filesize
-                    # redownload
-                    if local_size != file_length and attempts != 3:
+                        # if the local filesize matches the remote filesize (or the server sent
+                        # no length and we got data), move on to encoding
+                        local_size = os.path.getsize(filepath)
+                        if local_size == file_length or (not file_length and local_size):
+                            break
                         print(f"{filename} is incomplete, retrying..")
-                        continue
+                    attempts += 1
                     # if the maximum number of retry attempts is reached give up and move on
-                    elif attempts == 3:
+                    if attempts == 3:
                         print("Maximum retries reached.. skipping.")
                         # Clean up incomplete file
-                        os.remove(filepath)
-                        break
-                    # if all is well continue the download process for the rest of the tracks
-                    else:
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        skip = True
                         break
                 except Exception as e:
                     print(e)

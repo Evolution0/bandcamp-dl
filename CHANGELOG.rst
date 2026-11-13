@@ -63,3 +63,7 @@ Unreleased
 - [Bugfix] Artist pages that list releases only as music grid links (no
   ``data-client-items``) no longer return an empty discography. Grid links
   and ``data-client-items`` are now combined.
+- [Bugfix] HTTP error responses are no longer saved as tracks, and an
+  empty or partial leftover ``.mp3.tmp`` file is redownloaded instead of
+  tagged. Both caused ``HeaderNotFoundError: can't sync to MPEG frame``.
+  Failed downloads now give up after 3 attempts instead of retrying forever.
