@@ -27,6 +27,7 @@ dependencies = [
     "unicode-slugify @ git+https://github.com/mozilla/unicode-slugify.git@refs/pull/41/head",
     "urllib3 >= 2.8.0",
     "requests-ratelimiter >= 0.10.0",
+    "rich >= 15.0.0",
 ]
 
 license = {text = "Unlicense"}
