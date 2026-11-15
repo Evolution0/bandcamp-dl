@@ -49,3 +49,26 @@ Version 0.0.8
   available)
 - [Enhancement] --track option for downloading individual tracks and
   singles.
+
+Unreleased
+----------
+- [Bugfix] Artists whose pages redirect forever between
+  ``name.bandcamp.com`` and a broken custom domain (``TooManyRedirects``)
+  now download through Bandcamp's mobile API instead. Lyrics are not
+  available on this path.
+- [Bugfix] Page requests now wait and retry when Bandcamp rate limits them
+  (HTTP 429). A page that still fails is reported with its HTTP status
+  instead of "does not exist", and a failed artist/label page exits with
+  code 2 instead of silently finding no albums.
+- [Bugfix] Artist pages that list releases only as music grid links (no
+  ``data-client-items``) no longer return an empty discography. Grid links
+  and ``data-client-items`` are now combined.
+- [Bugfix] HTTP error responses are no longer saved as tracks, and an
+  empty or partial leftover ``.mp3.tmp`` file is redownloaded instead of
+  tagged. Both caused ``HeaderNotFoundError: can't sync to MPEG frame``.
+  Failed downloads now give up after 3 attempts instead of retrying forever.
+- [Bugfix] Creating an album folder no longer fails with
+  ``FileExistsError`` when the folder already exists but a flaky network
+  mount reported it missing.
+- [Bugfix] ``--embed-art`` no longer crashes with ``TypeError`` on albums
+  that have no cover art.

@@ -2,6 +2,7 @@ import sys
 import datetime
 import json
 import logging
+import time
 
 import bs4
 import requests
@@ -51,6 +52,11 @@ DEFAULT_CIPHERS = ":".join(
 )
 ctx.set_ciphers(DEFAULT_CIPHERS)
 
+MOBILE_API = "https://bandcamp.com/api/mobile/24"
+SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
+API_RETRIES = 5
+PAGE_RETRIES = 5
+
 class Bandcamp:
     """Core parsing logic"""
     def __init__(self, limit_req_per_minute: int = 0, debugging: bool = False):
@@ -62,6 +68,8 @@ class Bandcamp:
                         f'(https://github.com/evolution0/bandcamp-dl)'}
         self.soup = None
         self.tracks = None
+        # tralbum_details responses keyed by bandcamp_url, filled by the mobile API fallback
+        self.api_tralbums = {}
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
         self.debugging = debugging
         self.logger.disabled = debugging
@@ -89,14 +97,22 @@ class Bandcamp:
         :return: album metadata
         """
 
+        if url in self.api_tralbums:
+            return self.parse_api_tralbum(self.api_tralbums[url], url, art, genres, cover_quality)
+
         try:
-            response = self.session.get(url, headers=self.headers)
+            response = self.get_page(url)
         except requests.exceptions.MissingSchema:
             return None
+        except requests.exceptions.TooManyRedirects:
+            return self.parse_via_api(url, art, genres, cover_quality)
 
         if not response.ok:
             self.logger.debug(" Status code: %s", response.status_code)
-            print(f"The Album/Track requested does not exist at: {url}")
+            if response.status_code == 404:
+                print(f"The Album/Track requested does not exist at: {url}")
+            else:
+                print(f"Could not fetch {url}: HTTP {response.status_code}")
             sys.exit(2)
 
 
@@ -233,9 +249,26 @@ class Bandcamp:
 
         return album
 
+    def get_page(self, url: str) -> requests.Response:
+        """GET a page, waiting and retrying while Bandcamp rate limits us (HTTP 429)
+
+        :param url: page url
+        :return: the last response, which may still be an error
+        """
+        for attempt in range(PAGE_RETRIES):
+            response = self.session.get(url, headers=self.headers)
+            if response.status_code != 429:
+                break
+            # Retry-After may be missing or an HTTP date; back off exponentially then
+            retry_after = response.headers.get('Retry-After', '')
+            delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+            print(f"Rate limited by Bandcamp, retrying in {delay}s..")
+            time.sleep(delay)
+        return response
+
     def get_track_lyrics(self, track_url):
         self.logger.debug(" Fetching track lyrics..")
-        track_page = self.session.get(track_url, headers=self.headers)
+        track_page = self.get_page(track_url)
         try:
             track_soup = bs4.BeautifulSoup(track_page.text, "lxml")
         except bs4.FeatureNotFound:
@@ -328,10 +361,19 @@ class Bandcamp:
         self.logger.info(f"Scraping discography from: {music_page_url}")
 
         try:
-            response = self.session.get(music_page_url, headers=self.headers)
+            response = self.get_page(music_page_url)
+        except requests.exceptions.TooManyRedirects:
+            self.logger.warning(f"{music_page_url} is stuck in a redirect loop, "
+                                f"falling back to Bandcamp's mobile API")
+            return self.get_api_discography(name)
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Could not fetch artist/label page {music_page_url}: {e}")
             return []
+
+        if not response.ok:
+            # Fail loudly: an error page has no music grid and would look like an empty discography
+            print(f"Could not fetch {music_page_url}: HTTP {response.status_code}")
+            sys.exit(2)
 
         try:
             soup = bs4.BeautifulSoup(response.text, "lxml")
@@ -354,6 +396,12 @@ class Bandcamp:
                             album_urls.add(full_url)
                 except (json.JSONDecodeError, TypeError) as e:
                     self.logger.error(f"Failed to parse data-client-items JSON: {e}")
+            # Releases can be listed as grid links, in data-client-items, or both
+            self.logger.debug("Scraping all <li> elements in the music grid for links.")
+            for a in music_grid.select('li.music-grid-item a'):
+                href = a.get('href')
+                if href:
+                    album_urls.add(urljoin(music_page_url, href))
         except AttributeError:
             # This is slow for some reason, needs work
             self.logger.warning("Retrying as a Label page.")
@@ -373,19 +421,125 @@ class Bandcamp:
                             album_urls.add(full_url)
             else:
                 return []
-        """
-        self.logger.debug("Scraping all <li> elements in the music grid for links.")
-        for a in music_grid.select('li.music-grid-item a'):
-            href = a.get('href')
-            if href:
-                full_url = urljoin(music_page_url, href)
-                album_urls.add(full_url)
-        """
         self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
         return list(album_urls)
 
+    # Mobile API fallback: some artists' pages redirect forever between
+    # name.bandcamp.com and a broken custom domain, but the JSON API still answers.
+
+    def api_request(self, method: str, url: str, **kwargs) -> dict:
+        for attempt in range(API_RETRIES):
+            response = self.session.request(method, url, headers=self.headers, **kwargs)
+            if response.status_code != 429:
+                break
+            # Retry-After may be missing or an HTTP date; back off exponentially then
+            retry_after = response.headers.get('Retry-After', '')
+            delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+            self.logger.debug(f"Rate limited by the mobile API, retrying in {delay}s")
+            time.sleep(delay)
+        response.raise_for_status()
+        return response.json()
+
+    def find_band_id(self, name: str) -> int | None:
+        """Look up a band ID by its bandcamp.com subdomain name
+
+        :param name: artist/label subdomain name
+        :return: band ID, or None if no matching band was found
+        """
+        hosts = {f"{name}.bandcamp.com"}
+        # Search results list custom-domain artists under that domain, so also trust
+        # exactly the host that name.bandcamp.com redirects to
+        location = self.session.request("GET", f"https://{name}.bandcamp.com/",
+                                        headers=self.headers,
+                                        allow_redirects=False).headers.get('Location')
+        if location:
+            hosts.add(urlparse(location).netloc)
+        results = self.api_request("POST", SEARCH_API, json={
+            "search_text": name, "search_filter": "", "full_page": False})
+        for result in results.get('auto', {}).get('results', []):
+            host = urlparse(result.get('item_url_root', '')).netloc
+            if result.get('type') == 'b' and host in hosts:
+                return result['id']
+        return None
+
+    def get_api_discography(self, name: str, wanted_path: str | None = None) -> list:
+        """Generate a list of album and track urls through the mobile API
+
+        Caches each release's tralbum_details by its url so parse() can skip the web page.
+
+        :param name: artist/label subdomain name
+        :param wanted_path: stop once a release with this url path (e.g. /album/x) is found
+        :return: urls as list of strs
+        """
+        try:
+            band_id = self.find_band_id(name)
+            if band_id is None:
+                self.logger.error(f"Could not find a band ID for: {name}")
+                return []
+            band = self.api_request("POST", f"{MOBILE_API}/band_details",
+                                    json={"band_id": band_id})
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.error(f"Could not fetch discography for {name} from the mobile API: {e}")
+            return []
+
+        urls = []
+        for item in band.get('discography', []):
+            params = {"band_id": item.get('band_id', band_id),
+                      "tralbum_type": item['item_type'][0],
+                      "tralbum_id": item['item_id']}
+            try:
+                tralbum = self.api_request("GET", f"{MOBILE_API}/tralbum_details", params=params)
+            except (requests.exceptions.RequestException, ValueError) as e:
+                self.logger.error(f"Skipping {item.get('title')}, mobile API request failed: {e}")
+                continue
+            self.api_tralbums[tralbum['bandcamp_url']] = tralbum
+            urls.append(tralbum['bandcamp_url'])
+            if wanted_path and urlparse(tralbum['bandcamp_url']).path == wanted_path:
+                break
+        self.logger.info(f"Found a total of {len(urls)} releases through the mobile API.")
+        return urls
+
+    def parse_via_api(self, url: str, art: bool, genres: bool, cover_quality: int) -> dict:
+        """Parse an album/track whose web page redirect-loops, through the mobile API"""
+        self.logger.warning(f"{url} is stuck in a redirect loop, falling back to Bandcamp's mobile API")
+        parsed_url = urlparse(url)
+        # Only look at this band's releases; the cache may hold other bands' too
+        for api_url in self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path):
+            if urlparse(api_url).path == parsed_url.path:
+                return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, genres,
+                                              cover_quality)
+        print(f"The Album/Track requested does not exist at: {url}")
+        sys.exit(2)
+
+    def parse_api_tralbum(self, tralbum: dict, url: str, art: bool, genres: bool,
+                          cover_quality: int) -> dict:
+        """Build the same album dict as parse() from a mobile API tralbum_details response"""
+        all_tracks = tralbum.get('tracks', [])
+        tracks = [{"duration": track['duration'],
+                   "track": str(track['track_num']),
+                   "title": track['title'],
+                   "artist": track.get('band_name') or tralbum['tralbum_artist'],
+                   "track_id": track['track_id'],
+                   "url": track['streaming_url']['mp3-128']}
+                  for track in all_tracks if (track.get('streaming_url') or {}).get('mp3-128')]
+        release_date = tralbum.get('release_date')
+        return {
+            "tracks": tracks,
+            "title": tralbum['title'],
+            "artist": tralbum['tralbum_artist'],
+            "label": tralbum.get('label'),
+            "full": len(tracks) == len(all_tracks),
+            "art": (f"https://f4.bcbits.com/img/a{tralbum['art_id']}_{cover_quality}.jpg"
+                    if art and tralbum.get('art_id') else ""),
+            "date": (str(datetime.datetime.fromtimestamp(release_date, datetime.timezone.utc).year)
+                     if release_date else ""),
+            "url": url,
+            "genres": "; ".join(tag['name'] for tag in tralbum.get('tags', [])) if genres else "",
+            "album_id": tralbum['id'],
+        }
+
     def get_playlist(self, playlist_url: str) -> list:
-        playlist = self.session.get(playlist_url, headers=self.headers)
+        playlist = self.get_page(playlist_url)
         try:
             playlist_soup = bs4.BeautifulSoup(playlist.text, "lxml")
         except bs4.FeatureNotFound:
