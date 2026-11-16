@@ -103,6 +103,9 @@ Options
                               Truncate album title to a maximum length. 0 for no limit.
       --truncate-track LENGTH
                               Truncate track title to a maximum length. 0 for no limit.
+      --progress {auto,plain}
+                              Progress output: "auto" shows a line per track that updates in place,
+                              "plain" shows one rewritten line. Default is auto.
 
 Filename Template
 -----------------

@@ -8,6 +8,7 @@ from bandcamp_dl import __version__
 from bandcamp_dl.bandcamp import Bandcamp
 from bandcamp_dl.bandcampdownloader import BandcampDownloader
 from bandcamp_dl import config
+from bandcamp_dl.progress import PROGRESS_AUTO, PROGRESS_PLAIN
 
 from urllib.parse import urlparse
 
@@ -73,6 +74,9 @@ def main():
                         help='Truncate track title to a maximum length. 0 for no limit.')
     parser.add_argument('--limit-req-per-minute', type=int, default=conf.limit_req_per_minute,
                         help='Limit the number of requests sent per minute. 0 for no limit.')
+    parser.add_argument('--progress', choices=[PROGRESS_AUTO, PROGRESS_PLAIN], default=conf.progress,
+                        help='Progress output: "auto" shows a line per track that updates in place, '
+                             f'"plain" shows one rewritten line. Default is {conf.progress}.')
 
 
     arguments = parser.parse_args()

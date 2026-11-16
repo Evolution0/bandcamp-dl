@@ -1,7 +1,6 @@
 import logging
 import os
 import re
-import shutil
 
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC, TDOR, TDRL
@@ -11,11 +10,7 @@ import slugify
 
 from bandcamp_dl import __version__
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
-
-
-def print_clean(msg):
-    terminal_size = shutil.get_terminal_size()
-    print(f'{msg}{" " * (int(terminal_size[0]) - len(msg))}', end='')
+from bandcamp_dl.progress import make_progress
 
 
 class BandcampDownloader:
@@ -46,8 +41,6 @@ class BandcampDownloader:
         self.urls = urls
 
         self.album_art = None
-        self.track_num = None
-        self.num_tracks = None
 
     def start(self, album: dict):
         """Start album download process
@@ -151,6 +144,16 @@ class BandcampDownloader:
         return directory
 
     def download_album(self, album: dict) -> bool:
+        """Download all MP3 files in the album, showing one progress line per track
+
+        :param album: album dict
+        :return: True if successful
+        """
+        with make_progress(self.config.progress, self.config.debug) as self.progress:
+            self.progress.album(album)
+            return self.download_tracks(album)
+
+    def download_tracks(self, album: dict) -> bool:
         """Download all MP3 files in the album
 
         :param album: album dict
@@ -179,14 +182,13 @@ class BandcampDownloader:
             if 0 < self.config.truncate_track < len(path_meta['title']):
                 path_meta['title'] = path_meta['title'][:self.config.truncate_track]
 
-            self.num_tracks = len(album['tracks'])
-            self.track_num = track_index + 1
 
             filepath = self.template_to_path(path_meta, self.config.ascii_only,
                                             self.config.ok_chars, self.config.space_char,
                                             self.config.keep_spaces, self.config.case_mode)
             filepath = filepath + ".tmp"
             filename = filepath.rsplit('/', 1)[1]
+            self.progress.track(track_index, filename)
             dirname = self.create_directory(filepath)
 
             self.logger.debug(" Current file:\n\t%s", filepath)
@@ -231,20 +233,17 @@ class BandcampDownloader:
                         # break out of the try/except and move on to the next file
                         break
                     elif os.path.exists(filepath[:-4]) and self.config.overwrite is not True:
-                        print(f"File: {filename[:-4]} already exists and is complete, skipping..")
+                        self.progress.skipped()
                         skip = True
                         break
                     else:
+                        self.progress.downloading(file_length)
                         with open(filepath, "wb") as f:
                             dl = 0
                             for data in r.iter_content(chunk_size=total or 8192):
                                 dl += len(data)
                                 f.write(data)
-                                if not self.config.debug:
-                                    done = int(50 * dl / file_length) if file_length else 0
-                                    print_clean(f'\r({self.track_num}/{self.num_tracks}) '
-                                                f'[{"=" * done}{" " * (50 - done)}] :: '
-                                                f'Downloading: {filename[:-8]}')
+                                self.progress.advance(dl)
                         # if the local filesize matches the remote filesize (or the server sent
                         # no length and we got data), move on to encoding
                         local_size = os.path.getsize(filepath)
@@ -254,14 +253,14 @@ class BandcampDownloader:
                     attempts += 1
                     # if the maximum number of retry attempts is reached give up and move on
                     if attempts == 3:
-                        print("Maximum retries reached.. skipping.")
+                        self.progress.failed("Maximum retries reached.. skipping.")
                         # Clean up incomplete file
                         if os.path.exists(filepath):
                             os.remove(filepath)
                         skip = True
                         break
                 except Exception as e:
-                    print(e)
+                    self.progress.failed(str(e))
                     print("Downloading failed..")
                     return False
             if not skip:
@@ -284,12 +283,7 @@ class BandcampDownloader:
         :param meta: dict of track metadata
         """
         self.logger.debug(" Encoding process starting..")
-
-        filename = filepath.rsplit('/', 1)[1][:-8]
-
-        if not self.config.debug:
-            print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] '
-                        f':: Encoding: {filename}')
+        self.progress.tagging()
 
         audio = MP3(filepath)
         if audio.tags is None:
@@ -337,7 +331,4 @@ class BandcampDownloader:
             os.remove(filepath[:-4])
             os.rename(filepath, filepath[:-4])
 
-        if self.config.debug:
-            return
-
-        print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] :: Finished: {filename}')
+        self.progress.finished(os.path.getsize(filepath[:-4]))
