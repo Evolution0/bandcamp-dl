@@ -28,6 +28,7 @@ class Config(dict):
     _defaults = {"base_dir": str(USER_HOME),  # TODO: pass the Path object instead?
                  "template": TEMPLATE,
                  "overwrite": False,
+                 "retag": False,
                  "no_art": False,
                  "embed_art": False,
                  "embed_lyrics": False,

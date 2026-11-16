@@ -26,7 +26,7 @@ def make_downloader(base_dir, progress):
         truncate_album=0, truncate_track=0, ascii_only=False, ok_chars="-_~",
         space_char="-", keep_spaces=False, case_mode="lower", overwrite=False,
         debug=False, embed_art=False, embed_genres=False, embed_lyrics=False, group=False,
-        no_confirm=True, progress=progress)
+        no_confirm=True, progress=progress, retag=False)
     return BandcampDownloader(config, ALBUM["url"])
 
 

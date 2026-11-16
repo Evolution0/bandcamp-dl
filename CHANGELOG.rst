@@ -72,6 +72,9 @@ Unreleased
   mount reported it missing.
 - [Bugfix] ``--embed-art`` no longer crashes with ``TypeError`` on albums
   that have no cover art.
+- [Enhancement] ``--retag`` rewrites the tags of tracks that already exist
+  (for example to add genres with ``--embed-genres``) without downloading
+  them again.
 - [Enhancement] New per-track progress display: one line per track that
   updates in place, with a spinner, bar, size and speed, then ✔ or ✘. Use
   ``--progress plain`` for the previous single-line output. Adds the

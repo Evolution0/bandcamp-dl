@@ -206,6 +206,13 @@ class BandcampDownloader:
             elif os.path.exists(cover_path):
                 self.album_art = cover_path
 
+            if self.config.retag and os.path.exists(filepath[:-4]):
+                # Tag the finished file in place instead of downloading it again;
+                # write_id3_tags renames the .tmp back to the final name
+                os.rename(filepath[:-4], filepath)
+                self.write_id3_tags(filepath, track_meta)
+                continue
+
             attempts = 0
             skip = False
 
