@@ -59,31 +59,33 @@ class Config(dict):
 
     def _read_write_config(self):
         if CONFIG_PATH.exists():
-            with pathlib.Path.open(CONFIG_PATH, 'r+') as fobj:
-                try:
-                    user_config = json.load(fobj)
-                    # change hyphen with underscore
-                    user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
-                    # overwrite defaults with user provided config
-                    if self._update_with_dict(user_config) or \
-                      set(user_config.keys()).difference(set(self.keys())) :
-                        # persist migrated options, removal of unsupported options, or missing
-                        # options with their defaults
-                        sys.stderr.write(f"Modified configuration has been written to "
-                                         f"`{CONFIG_PATH}'.\n")
-                        fobj.seek(0)  # r/w mode
-                        fobj.truncate()  # r/w mode
-                        json.dump({k: v for k, v in self.items()}, fobj)
-                except json.JSONDecodeError:
-                    # NOTE: we don't have logger yet
-                    sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
+            if os.access(CONFIG_PATH, os.W_OK):
+                with pathlib.Path.open(CONFIG_PATH, 'r+') as fobj:
+                    try:
+                        user_config = json.load(fobj)
+                        # change hyphen with underscore
+                        user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
+                        # overwrite defaults with user provided config
+                        if self._update_with_dict(user_config) or \
+                          set(user_config.keys()).difference(set(self.keys())) :
+                            # persist migrated options, removal of unsupported options, or missing
+                            # options with their defaults
+                            sys.stderr.write(f"Modified configuration has been written to "
+                                             f"`{CONFIG_PATH}'.\n")
+                            fobj.seek(0)  # r/w mode
+                            fobj.truncate()  # r/w mode
+                            json.dump({k: v for k, v in self.items()}, fobj)
+                    except json.JSONDecodeError:
+                        # NOTE: we don't have logger yet
+                        sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
         else:
             # No config found - populate it with the defaults
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
-                conf = {k.replace('_', '-'): v for k, v in self.items()}
-                json.dump(conf, fobj)
-            sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
+            if os.access(CONFIG_PATH, os.W_OK):
+                with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
+                    conf = {k.replace('_', '-'): v for k, v in self.items()}
+                    json.dump(conf, fobj)
+                sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
 
     def _update_with_dict(self, dict_):
         """update this config instance with the persisted key-value
