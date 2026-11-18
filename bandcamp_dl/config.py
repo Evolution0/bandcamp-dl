@@ -1,6 +1,7 @@
 import argparse
 import ast
 import json
+import logging
 import os
 import pathlib
 import sys
@@ -55,37 +56,60 @@ class Config(dict):
         else:
             super().__init__(**dict_)
         self.__dict__ = self
+        self.first_run = True
         self._read_write_config()
 
-    def _read_write_config(self):
+    def _sanity_check(self):
         if CONFIG_PATH.exists():
+            sys.stderr.write("Config dir exists.\n")
             if os.access(CONFIG_PATH, os.W_OK):
-                with pathlib.Path.open(CONFIG_PATH, 'r+') as fobj:
-                    try:
-                        user_config = json.load(fobj)
-                        # change hyphen with underscore
-                        user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
+                sys.stderr.write("The config file is writable.\n")
+                self.first_run = False
+                self.touch = True
+            else:
+                sys.stderr.write("The config file is not writable.\n")
+                self.first_run = False
+                self.touch = False
+        else:
+            self.first_run = True
+            self.touch = True
+
+    def _read_write_config(self):
+        self._sanity_check()
+        if self.touch:
+            file_mode = 'r+'
+        else:
+            file_mode = 'r'
+
+        if self.first_run:
+            sys.stderr.write("No config found - populate it with the defaults.\n")
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+            with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
+                # Ignore key/values added to self other than config options
+                conf = {k.replace('_', '-'): v for k, v in self.items() if k in self._defaults}
+                json.dump(conf, fobj)
+            sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
+        else:
+            sys.stderr.write(f"Opening config file `{CONFIG_PATH}` as {file_mode}\n")
+            with pathlib.Path.open(CONFIG_PATH, file_mode) as fobj:
+                try:
+                    user_config = json.load(fobj)
+                    # change hyphen with underscore
+                    user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
+                    if self._update_with_dict(user_config) or \
+                            set(user_config.keys()).difference(set(self.keys())):
                         # overwrite defaults with user provided config
-                        if self._update_with_dict(user_config) or \
-                          set(user_config.keys()).difference(set(self.keys())) :
-                            # persist migrated options, removal of unsupported options, or missing
-                            # options with their defaults
+                        sys.stderr.write("Modifying config file.\n")
+                        # persist migrated options, removal of unsupported options, or missing
+                        # options with their defaults
+                        if self.touch:
                             sys.stderr.write(f"Modified configuration has been written to "
-                                             f"`{CONFIG_PATH}'.\n")
+                                                f"`{CONFIG_PATH}'.\n")
                             fobj.seek(0)  # r/w mode
                             fobj.truncate()  # r/w mode
                             json.dump({k: v for k, v in self.items()}, fobj)
-                    except json.JSONDecodeError:
-                        # NOTE: we don't have logger yet
-                        sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
-        else:
-            # No config found - populate it with the defaults
-            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            if os.access(CONFIG_PATH, os.W_OK):
-                with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
-                    conf = {k.replace('_', '-'): v for k, v in self.items()}
-                    json.dump(conf, fobj)
-                sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
+                except json.JSONDecodeError:
+                    sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
 
     def _update_with_dict(self, dict_):
         """update this config instance with the persisted key-value
