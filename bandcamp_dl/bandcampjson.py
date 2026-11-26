@@ -9,7 +9,8 @@ class BandcampJSON:
         self.body = body
         self.json_data = []
         self.logger = logging.getLogger("bandcamp-dl").getChild("JSON")
-        self.logger.disabled = debugging
+        # Debug chatter only; warnings and errors show with or without --debug
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
 
     def generate(self):
         """Grabbing needed data from the page"""

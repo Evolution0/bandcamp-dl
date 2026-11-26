@@ -58,3 +58,30 @@ def test_existing_track_is_left_alone_without_retag(tmp_path):
     make_downloader(tmp_path, retag=False).download_album(ALBUM)
 
     assert "TCON" not in ID3(track)
+
+
+@responses.activate
+def test_retag_replaces_a_stale_tmp_file(tmp_path):
+    track = make_existing_track(tmp_path)
+    stale = track.with_name(track.name + ".tmp")
+    stale.write_bytes(b"half a download from a run that was interrupted")
+
+    make_downloader(tmp_path, retag=True).download_album(ALBUM)
+
+    assert not stale.exists()
+    assert str(ID3(track)["TCON"]) == "ambient; drone"
+
+
+@responses.activate
+def test_a_failed_retag_restores_the_finished_file(tmp_path, monkeypatch):
+    def cannot_tag(self, filepath, meta):
+        raise ValueError("not an mp3")
+
+    monkeypatch.setattr(BandcampDownloader, "write_id3_tags", cannot_tag)
+    track = make_existing_track(tmp_path)
+    before = track.read_bytes()
+
+    assert make_downloader(tmp_path, retag=True).download_album(ALBUM) is False
+
+    assert not track.with_name(track.name + ".tmp").exists()
+    assert track.read_bytes() == before

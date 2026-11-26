@@ -1,7 +1,8 @@
 import pytest
 import responses
 
-from bandcamp_dl.bandcamp import Bandcamp
+from bandcamp_dl import bandcamp as bandcamp_module
+from bandcamp_dl.bandcamp import Bandcamp, PAGE_RETRIES
 
 ALBUM_URL = "https://busy.bandcamp.com/album/first"
 MUSIC_URL = "https://busy.bandcamp.com/music"
@@ -44,3 +45,15 @@ def test_discography_fails_loudly_when_rate_limited(capsys):
 
     assert exit_info.value.code == 2
     assert "HTTP 429" in capsys.readouterr().out
+
+
+@responses.activate
+def test_get_page_does_not_sleep_after_the_last_attempt(monkeypatch):
+    slept = []
+    monkeypatch.setattr(bandcamp_module.time, "sleep", lambda seconds: slept.append(seconds))
+    add_rate_limited(MUSIC_URL)
+
+    with pytest.raises(SystemExit):
+        Bandcamp().get_full_discography("busy", "music")
+
+    assert len(slept) == PAGE_RETRIES - 1

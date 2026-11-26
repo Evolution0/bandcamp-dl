@@ -4,13 +4,12 @@ import re
 
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC, TDOR, TDRL
-import requests
-from  requests_ratelimiter import LimiterAdapter
 import slugify
 
 from bandcamp_dl import __version__
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
 from bandcamp_dl.progress import make_progress
+from bandcamp_dl.session import make_session
 
 
 class BandcampDownloader:
@@ -19,33 +18,31 @@ class BandcampDownloader:
 
         :param config: user config/args
         :param urls: list of urls
+        :param debugging: toggle verbose logging
         """
         self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
                         f'(https://github.com/evolution0/bandcamp-dl)'}
 
-        self.session = requests.Session()
-        if 0 < config.limit_req_per_minute:
-            # Mount the rate-limiting adapter to the session
-            self.rate_adapter = LimiterAdapter(per_minute=config.limit_req_per_minute)
-            self.session.mount('https://', self.rate_adapter)
-        else:
-            self.rate_adapter = None
+        self.session = make_session(config.limit_req_per_minute)
 
         self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
-        self.logger.disabled = debugging
+        # Debug chatter only: warnings and errors should still show without --debug,
+        # and the old `disabled = debugging` flag muted them exactly when debugging
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
 
-        if type(urls) is str:
-            self.urls = [urls]
+        if isinstance(urls, str):
+            urls = [urls]
 
         self.config = config
         self.urls = urls
 
         self.album_art = None
 
-    def start(self, album: dict):
+    def start(self, album: dict) -> bool | None:
         """Start album download process
 
         :param album: album dict
+        :return: False if a track failed, None if the download was cancelled
         """
 
         if not album['full'] and not self.config.no_confirm:
@@ -53,14 +50,12 @@ class BandcampDownloader:
                            "(yes/no): ").lower()
             if choice == "yes" or choice == "y":
                 print("Starting download process.")
-                self.download_album(album)
-                return None
+                return self.download_album(album)
             else:
                 print("Cancelling download process.")
                 return None
         else:
-            self.download_album(album)
-            return None
+            return self.download_album(album)
 
     def template_to_path(self, track: dict, ascii_only, ok_chars, space_char, keep_space,
                          case_mode) -> str:
@@ -159,6 +154,7 @@ class BandcampDownloader:
         :param album: album dict
         :return: True if successful
         """
+        album_failed = False
         for track_index, track in enumerate(album['tracks']):
             track_meta = {"artist": track['artist'],
                           "albumartist": album['artist'],
@@ -209,12 +205,24 @@ class BandcampDownloader:
             if self.config.retag and os.path.exists(filepath[:-4]):
                 # Tag the finished file in place instead of downloading it again;
                 # write_id3_tags renames the .tmp back to the final name
+                if os.path.exists(filepath):
+                    # A stale .tmp from an interrupted run would be silently overwritten
+                    # by the rename below, on Windows it would raise instead
+                    os.remove(filepath)
                 os.rename(filepath[:-4], filepath)
-                self.write_id3_tags(filepath, track_meta)
+                try:
+                    self.write_id3_tags(filepath, track_meta)
+                except Exception as e:
+                    self.progress.failed(str(e))
+                    print(f"Retagging {filename[:-4]} failed, moving on to the next track..")
+                    # Never leave a finished track parked under its .tmp name
+                    self.rename_tmp_back(filepath)
+                    album_failed = True
                 continue
 
             attempts = 0
             skip = False
+            file_length = 0
 
             while True:
                 try:
@@ -258,13 +266,28 @@ class BandcampDownloader:
                         if os.path.exists(filepath):
                             os.remove(filepath)
                         skip = True
+                        album_failed = True
                         break
                 except Exception as e:
                     self.progress.failed(str(e))
-                    print("Downloading failed..")
-                    return False
+                    print(f"{filename[:-4]} failed, moving on to the next track..")
+                    # Drop an incomplete file so it is never mistaken for a download, but keep
+                    # one that arrived whole and only failed while tagging
+                    complete = bool(file_length) and os.path.exists(filepath) and \
+                        os.path.getsize(filepath) == file_length
+                    if os.path.exists(filepath) and not complete:
+                        os.remove(filepath)
+                    skip = True
+                    album_failed = True
+                    break
             if not skip:
-                self.write_id3_tags(filepath, track_meta)
+                try:
+                    self.write_id3_tags(filepath, track_meta)
+                except Exception as e:
+                    self.progress.failed(str(e))
+                    print(f"Tagging {filename[:-4]} failed, the audio is still in {filepath}..")
+                    # Keep the downloaded .tmp: the next run re-tags it without downloading again
+                    album_failed = True
 
         if os.path.isfile(f"{self.config.base_dir}/{__version__}.not.finished"):
             os.remove(f"{self.config.base_dir}/{__version__}.not.finished")
@@ -274,7 +297,18 @@ class BandcampDownloader:
         if self.config.embed_art and self.album_art:
             os.remove(self.album_art)
 
-        return True
+        return not album_failed
+
+    def rename_tmp_back(self, filepath: str):
+        """Put a track that was parked under its .tmp name back under the real one
+
+        :param filepath: the .tmp path
+        """
+        try:
+            if os.path.exists(filepath):
+                os.rename(filepath, filepath[:-4])
+        except OSError as e:
+            self.logger.warning(f"Could not restore {filepath} to {filepath[:-4]}: {e}")
 
     def write_id3_tags(self, filepath: str, meta: dict):
         """Write metadata to the MP3 file
@@ -291,7 +325,9 @@ class BandcampDownloader:
 
         audio.tags.add(WOAF(encoding=3, url=meta["url"]))
 
-        if self.config.group and 'label' in meta:
+        # 'label' is always in meta but is None for releases with no seller entry, and
+        # mutagen raises on None text, which used to abort the album midway
+        if self.config.group and meta.get('label'):
             audio.tags.add(TIT1(encoding=3, text=meta["label"]))
 
         if self.config.embed_lyrics:

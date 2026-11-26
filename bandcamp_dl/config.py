@@ -85,9 +85,7 @@ class Config(dict):
             sys.stderr.write("No config found - populate it with the defaults.\n")
             os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
             with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
-                # Ignore key/values added to self other than config options
-                conf = {k.replace('_', '-'): v for k, v in self.items() if k in self._defaults}
-                json.dump(conf, fobj)
+                json.dump(self._as_json(), fobj)
             sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
         else:
             sys.stderr.write(f"Opening config file `{CONFIG_PATH}` as {file_mode}\n")
@@ -97,7 +95,8 @@ class Config(dict):
                     # change hyphen with underscore
                     user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
                     if self._update_with_dict(user_config) or \
-                            set(user_config.keys()).difference(set(self.keys())):
+                            set(user_config.keys()).difference(set(self.keys())) or \
+                            set(self._defaults).difference(set(user_config.keys())):
                         # overwrite defaults with user provided config
                         sys.stderr.write("Modifying config file.\n")
                         # persist migrated options, removal of unsupported options, or missing
@@ -107,9 +106,18 @@ class Config(dict):
                                                 f"`{CONFIG_PATH}'.\n")
                             fobj.seek(0)  # r/w mode
                             fobj.truncate()  # r/w mode
-                            json.dump({k: v for k, v in self.items()}, fobj)
+                            json.dump(self._as_json(), fobj)
                 except json.JSONDecodeError:
                     sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
+
+    def _as_json(self):
+        """the config options as they are stored in the file, with hyphenated keys
+
+           this class maps its own __dict__ onto itself, so the run bookkeeping attributes
+           (first_run / touch) sit in the same dict as the options and must not be written out
+           as if they were settings"""
+        return {k.replace('_', '-'): v for k, v in self.items()
+                if k not in ('first_run', 'touch')}
 
     def _update_with_dict(self, dict_):
         """update this config instance with the persisted key-value
@@ -123,6 +131,7 @@ class Config(dict):
                     sys.stderr.write(f"Dropping unknown config option '{key}={val}'\n")
                 continue
             self[key] = val
+        return modified
 
     def _migrate_option(self, key, val):
         """where supported, migrate legacy options and their values

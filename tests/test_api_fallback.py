@@ -1,8 +1,10 @@
 import re
 
+import pytest
 import responses
 
-from bandcamp_dl.bandcamp import MOBILE_API, SEARCH_API, Bandcamp
+from bandcamp_dl import bandcamp as bandcamp_module
+from bandcamp_dl.bandcamp import API_RETRIES, MOBILE_API, SEARCH_API, Bandcamp
 
 ALBUM_URL = "https://loopy.example/album/first"
 
@@ -108,3 +110,17 @@ def test_discography_returns_empty_when_band_not_found():
     responses.add(responses.POST, SEARCH_API, json={"auto": {"results": []}})
 
     assert Bandcamp().get_full_discography("loopy", "music") == []
+
+
+@responses.activate
+def test_api_request_gives_up_instead_of_sleeping_after_the_last_retry(monkeypatch):
+    import requests
+
+    slept = []
+    monkeypatch.setattr(bandcamp_module.time, "sleep", lambda seconds: slept.append(seconds))
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details", status=429)
+
+    with pytest.raises(requests.exceptions.HTTPError):
+        Bandcamp().api_request("GET", f"{MOBILE_API}/tralbum_details")
+
+    assert len(slept) == API_RETRIES - 1

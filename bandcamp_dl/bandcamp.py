@@ -2,55 +2,16 @@ import sys
 import datetime
 import json
 import logging
+import re
 import time
 
 import bs4
 import requests
-from requests.adapters import HTTPAdapter
-from requests_ratelimiter import LimiterAdapter
-from urllib3.util import create_urllib3_context
-from urllib.parse import urlparse, urlunparse, urljoin
+from urllib.parse import urlparse, urljoin
 
 from bandcamp_dl import __version__
 from bandcamp_dl.bandcampjson import BandcampJSON
-
-class SSLAdapter(HTTPAdapter):
-    def __init__(self, ssl_context=None, **kwargs):
-        self.ssl_context = ssl_context
-        super().__init__(**kwargs)
-
-    def init_poolmanager(self, *args, **kwargs):
-        kwargs['ssl_context'] = self.ssl_context
-        return super().init_poolmanager(*args, **kwargs)
-
-    def proxy_manager_for(self, *args, **kwargs):
-        kwargs['ssl_context'] = self.ssl_context
-        return super().proxy_manager_for(*args, **kwargs)
-    
-# Create the SSL context with the custom ciphers
-ctx = create_urllib3_context()
-ctx.load_default_certs()
-
-DEFAULT_CIPHERS = ":".join(
-    [
-        "ECDHE+AESGCM",
-        "ECDHE+CHACHA20",
-        "DHE+AESGCM",
-        "DHE+CHACHA20",
-        "ECDH+AESGCM",
-        "DH+AESGCM",
-        "ECDH+AES",
-        "DH+AES",
-        "RSA+AESGCM",
-        "RSA+AES",
-        "!aNULL",
-        "!eNULL",
-        "!MD5",
-        "!DSS",
-        "!AESCCM",
-    ]
-)
-ctx.set_ciphers(DEFAULT_CIPHERS)
+from bandcamp_dl.session import make_session
 
 MOBILE_API = "https://bandcamp.com/api/mobile/24"
 SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
@@ -72,18 +33,10 @@ class Bandcamp:
         self.api_tralbums = {}
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
         self.debugging = debugging
-        self.logger.disabled = debugging
-        self.session = requests.Session()
-        # Mount the adapter with the custom SSL context to the session
-        self.ssl_adapter = SSLAdapter(ssl_context=ctx)
-        self.session.mount('https://', self.ssl_adapter)
-
-        if 0 < limit_req_per_minute:
-            # Mount the rate-limiting adapter to the session
-            self.rate_adapter = LimiterAdapter(per_minute=limit_req_per_minute)
-            self.session.mount('https://', self.rate_adapter)
-        else:
-            self.rate_adapter = None
+        # Debug chatter only; warnings and errors must survive without --debug.
+        # The old `disabled = debugging` flag muted everything precisely when debugging was on.
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
+        self.session = make_session(limit_req_per_minute)
 
     def parse(self, url: str, art: bool = True, lyrics: bool = False, genres: bool = False,
               cover_quality: int = 0) -> dict | None:
@@ -98,14 +51,15 @@ class Bandcamp:
         """
 
         if url in self.api_tralbums:
-            return self.parse_api_tralbum(self.api_tralbums[url], url, art, genres, cover_quality)
+            return self.parse_api_tralbum(self.api_tralbums[url], url, art, lyrics, genres,
+                                          cover_quality)
 
         try:
             response = self.get_page(url)
         except requests.exceptions.MissingSchema:
             return None
         except requests.exceptions.TooManyRedirects:
-            return self.parse_via_api(url, art, genres, cover_quality)
+            return self.parse_via_api(url, art, lyrics, genres, cover_quality)
 
         if not response.ok:
             self.logger.debug(" Status code: %s", response.status_code)
@@ -259,6 +213,10 @@ class Bandcamp:
             response = self.session.get(url, headers=self.headers)
             if response.status_code != 429:
                 break
+            if attempt == PAGE_RETRIES - 1:
+                # Out of retries: report the rate limiting instead of stalling first
+                print(f"Still rate limited by Bandcamp after {PAGE_RETRIES} attempts..")
+                break
             # Retry-After may be missing or an HTTP date; back off exponentially then
             retry_after = response.headers.get('Retry-After', '')
             delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
@@ -333,17 +291,23 @@ class Bandcamp:
         """
         return f"https://{artist}.bandcamp.com/{page_type}/{slug}"
 
-    def get_album_art(self, quality: int = 0) -> str | None:
+    def get_album_art(self, quality: int = 0) -> str:
         """Find and retrieve album art url from page
 
         :param quality: The quality of the album art to retrieve
-        :return: url as str
+        :return: url as str, empty if the page carries no cover
         """
         try:
             url = self.soup.find(id='tralbumArt').find_all('a')[0]['href']
-            return f"{url[:-6]}{quality}{url[-4:]}"
-        except None:
-            pass
+        except (AttributeError, IndexError):
+            self.logger.debug(" Album art not found on the page..")
+            return ""
+        # Bandcamp puts the size in the last path segment: a1234567890_10.jpg
+        stem, separator, suffix = url.rpartition('_')
+        if not separator or not re.fullmatch(r'\d+\.(jpg|jpeg|png)', suffix, re.IGNORECASE):
+            self.logger.debug(f" Cover url {url} has no quality token to swap, using it as is")
+            return url
+        return f"{stem}_{quality}{suffix[suffix.rindex('.'):]}"
 
     def get_full_discography(self, name: str, page_type: str) -> list:
         """Generate a list of album and track urls based on the artist/label name
@@ -412,9 +376,9 @@ class Bandcamp:
                     href = a.get('href')
                     if href:
                         # Only need this for truncated links, some are already complete so first verify.
-                        if 'http' in href:
+                        if urlparse(href).scheme in ('http', 'https'):
                             # Apparently artists that are deleted/disabled have these modified links?
-                            if not '-disabled-' in href:
+                            if '-disabled-' not in href:
                                 album_urls.add(href)
                         else:
                             full_url = urljoin(music_page_url, href)
@@ -431,6 +395,10 @@ class Bandcamp:
         for attempt in range(API_RETRIES):
             response = self.session.request(method, url, headers=self.headers, **kwargs)
             if response.status_code != 429:
+                break
+            if attempt == API_RETRIES - 1:
+                # Out of retries: raise_for_status below reports the rate limiting
+                self.logger.debug(f"Still rate limited by the mobile API after {API_RETRIES} attempts")
                 break
             # Retry-After may be missing or an HTTP date; back off exponentially then
             retry_after = response.headers.get('Retry-After', '')
@@ -453,12 +421,16 @@ class Bandcamp:
                                         headers=self.headers,
                                         allow_redirects=False).headers.get('Location')
         if location:
-            hosts.add(urlparse(location).netloc)
+            redirect_host = urlparse(location).netloc
+            if redirect_host:
+                # A relative Location has no host; an empty one would match any
+                # result that is missing item_url_root
+                hosts.add(redirect_host)
         results = self.api_request("POST", SEARCH_API, json={
             "search_text": name, "search_filter": "", "full_page": False})
         for result in results.get('auto', {}).get('results', []):
             host = urlparse(result.get('item_url_root', '')).netloc
-            if result.get('type') == 'b' and host in hosts:
+            if result.get('type') == 'b' and host and host in hosts:
                 return result['id']
         return None
 
@@ -499,21 +471,27 @@ class Bandcamp:
         self.logger.info(f"Found a total of {len(urls)} releases through the mobile API.")
         return urls
 
-    def parse_via_api(self, url: str, art: bool, genres: bool, cover_quality: int) -> dict:
+    def parse_via_api(self, url: str, art: bool, lyrics: bool, genres: bool,
+                      cover_quality: int) -> dict:
         """Parse an album/track whose web page redirect-loops, through the mobile API"""
         self.logger.warning(f"{url} is stuck in a redirect loop, falling back to Bandcamp's mobile API")
         parsed_url = urlparse(url)
         # Only look at this band's releases; the cache may hold other bands' too
         for api_url in self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path):
             if urlparse(api_url).path == parsed_url.path:
-                return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, genres,
-                                              cover_quality)
+                return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, lyrics,
+                                              genres, cover_quality)
         print(f"The Album/Track requested does not exist at: {url}")
         sys.exit(2)
 
-    def parse_api_tralbum(self, tralbum: dict, url: str, art: bool, genres: bool,
-                          cover_quality: int) -> dict:
+    def parse_api_tralbum(self, tralbum: dict, url: str, art: bool, lyrics: bool,
+                          genres: bool, cover_quality: int) -> dict:
         """Build the same album dict as parse() from a mobile API tralbum_details response"""
+        if lyrics:
+            # tralbum_details carries no lyrics and the page that holds them is the one
+            # redirect-looping, so say so instead of quietly embedding nothing
+            self.logger.warning(f"Track lyrics are not available for {url} through the mobile API "
+                                f"fallback, skipping them")
         all_tracks = tralbum.get('tracks', [])
         tracks = [{"duration": track['duration'],
                    "track": str(track['track_num']),
@@ -553,18 +531,35 @@ class Bandcamp:
             self.logger.debug(f"Track count is > 50, requesting full track list via API.")
             playlist_cursor = 49
             playlist_id = playlist_json['appData']['playlistId']
-            while playlist_cursor:
+            # The page carries the first 50 tracks and the API returns 50 per request, so
+            # that is all the requests that can possibly be left; the bound also stops a
+            # server that keeps handing back a cursor from spinning forever
+            pages_remaining = -(-(track_count - 50) // 50)
+            fetched = 0
+            while playlist_cursor and pages_remaining:
                 playlist_payload = {
                     'item_id': playlist_id,
                     'item_type': "playlist",
                     'next_cursor': playlist_cursor
                 }
-                playlist_response = self.session.post("https://bandcamp.com/api/player/2/player_data_web", headers=self.headers, json=playlist_payload)
-                playlist_json = json.loads(playlist_response.text)
-                self.logger.debug(f"Tracks fetched: {playlist_cursor}")
-                playlist_cursor = playlist_json['tracklist']['nextCursor']
-                playlist_tracks += [track['url'] for track in playlist_json['tracklist']['tracks']]
-            self.logger.debug(f"Tracks fetched: {track_count}")
+                try:
+                    playlist_json = self.api_request(
+                        "POST", "https://bandcamp.com/api/player/2/player_data_web",
+                        json=playlist_payload)
+                except (requests.exceptions.RequestException, ValueError) as e:
+                    self.logger.error(f"Playlist tracklist request failed, downloading what "
+                                      f"was fetched so far: {e}")
+                    break
+                pages_remaining -= 1
+                tracklist = playlist_json.get('tracklist', {})
+                batch = tracklist.get('tracks', [])
+                fetched += len(batch)
+                if not batch:
+                    break
+                self.logger.debug(f"Tracks fetched: {49 + fetched}")
+                playlist_cursor = tracklist.get('nextCursor')
+                playlist_tracks += [track['url'] for track in batch]
+            self.logger.debug(f"Tracks fetched: {49 + fetched} of {track_count}")
             self.logger.debug("Full tracklist fetched, proceeding to download.")
         else:
             self.logger.debug(f"Track count is <= 50, skipping API requests.")
@@ -575,4 +570,6 @@ class Bandcamp:
                 self.logger.debug(f"Removing {track} from download queue as the account has been disabled")
             else:
                 purged_playlist.append(track)
-        return purged_playlist
+        # The page and the paged API can report the same track; downloading it twice would
+        # be pointless
+        return list(dict.fromkeys(purged_playlist))

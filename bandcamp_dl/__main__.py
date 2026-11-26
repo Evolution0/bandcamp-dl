@@ -108,7 +108,8 @@ def main():
                      ('ok_chars', config.OK_CHARS), ('space_char', config.SPACE_CHAR)]:
         if not getattr(arguments, arg):
             setattr(arguments, arg, val)
-    bandcamp = Bandcamp(limit_req_per_minute=arguments.limit_req_per_minute)
+    bandcamp = Bandcamp(limit_req_per_minute=arguments.limit_req_per_minute,
+                       debugging=arguments.debug)
 
     # TODO:
     #   Identify page type, determine download method, proceed.
@@ -120,13 +121,13 @@ def main():
 
     if arguments.artist and arguments.album:
         logger.debug(f"Specified an album for download: {arguments.artist} - {arguments.album}")
-        urls = Bandcamp.generate_album_url(arguments.artist, arguments.album, "album")
+        urls = [Bandcamp.generate_album_url(arguments.artist, arguments.album, "album")]
     elif arguments.artist and arguments.track:
         logger.debug(f"Specified a track for download: {arguments.artist} - {arguments.track}")
-        urls = Bandcamp.generate_album_url(arguments.artist, arguments.track, "track")
+        urls = [Bandcamp.generate_album_url(arguments.artist, arguments.track, "track")]
     elif arguments.artist:
         logger.debug(f"Specified an artist, downloading discography for: {arguments.artist}")
-        urls = Bandcamp.get_full_discography(bandcamp, arguments.artist, "music")
+        urls = bandcamp.get_full_discography(arguments.artist, "music")
     else:
         # This is where we process URL(s)
         logger.debug(f"Specified a URL or URLs, determining type..")
@@ -139,35 +140,52 @@ def main():
                 urls.extend(bandcamp.get_full_discography(name, "music"))
             elif '/playlist/' in parsed_url.path:
                 logger.debug(f"Specified a playlist, fetching tracklist for: {parsed_url.path}")
-                urls = Bandcamp.get_playlist(bandcamp, arguments.URL[0])
+                urls.extend(bandcamp.get_playlist(url))
             else:
                 urls.append(url)
 
     album_list = []
+    parse_failed = False
 
     for url in urls:
         if "/album/" not in url and "/track/" not in url:
             continue
         logger.debug("\n\tURL: %s", url)
-        album_list.append(bandcamp.parse(url, not arguments.no_art, arguments.embed_lyrics, arguments.embed_genres,
-                                         arguments.cover_quality))
-
-    for album in album_list:
+        album = bandcamp.parse(url, not arguments.no_art, arguments.embed_lyrics,
+                               arguments.embed_genres, arguments.cover_quality)
+        if album is None:
+            # parse() only gives up on a url it cannot even request, usually a missing scheme
+            print(f"Could not parse {url}, check the url is complete (https://..)")
+            parse_failed = True
+            continue
         logger.debug(f"Album data:\n\t{album}")
+        album_list.append(album)
+
+    if arguments.full_album:
         logger.debug("Pruning incomplete albums..")
-        if arguments.full_album and not album['full']:
-            print(f"Full album not available. Skipping {album['title']} ...")
-            # Remove not-full albums BUT continue with the rest of the albums.
-            album_list.remove(album)
+        # Rebuilding rather than removing from the list being iterated: removing shifted the
+        # next entry past the cursor and it was downloaded anyway
+        complete_albums = []
+        for album in album_list:
+            if not album['full']:
+                print(f"Full album not available. Skipping {album['title']} ...")
+                continue
+            complete_albums.append(album)
+        album_list = complete_albums
 
     if arguments.URL or arguments.artist:
         logger.debug("Preparing download process..")
+        download_failed = False
         for album in album_list:
-            bandcamp_downloader = BandcampDownloader(arguments, album['url'])
+            bandcamp_downloader = BandcampDownloader(arguments, album['url'], debugging=arguments.debug)
             logger.debug("Initiating download process..")
-            bandcamp_downloader.start(album)
+            if bandcamp_downloader.start(album) is False:
+                download_failed = True
             # Add a newline to stop prompt mangling
             print("")
+        if parse_failed or download_failed:
+            sys.stderr.write("Some albums could not be downloaded, see the messages above.\n")
+            sys.exit(1)
     else:
         logger.debug(r" /!\ Something went horribly wrong /!\ ")
 
