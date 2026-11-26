@@ -6,6 +6,25 @@ on:
       - master
 
 jobs:
+  test:
+    name: Test the release before publishing
+    # the gate: publish-to-testpypi will not start while this job is red; the name
+    # keeps this check apart from the "test" check tests.yml reports on pull requests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v7
+      with:
+        python-version: "3.13"
+    - name: Install bandcamp-dl and its test extras
+      run: python -m pip install -e ".[test]"
+    - name: Run pytest under coverage
+      run: python -m coverage run -m pytest
+    - name: Report coverage, fails under the configured floor
+      run: python -m coverage report
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -27,7 +46,7 @@ jobs:
 
   publish-to-testpypi:
     name: Publish to TestPyPI
-    needs: build
+    needs: [test, build]
     runs-on: ubuntu-latest
     # the identity TestPyPI matches this run against: the publisher you registered
     # names this repository, this workflow file and the testpypi environment
