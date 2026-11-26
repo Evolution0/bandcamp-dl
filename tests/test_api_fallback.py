@@ -124,3 +124,53 @@ def test_api_request_gives_up_instead_of_sleeping_after_the_last_retry(monkeypat
         Bandcamp().api_request("GET", f"{MOBILE_API}/tralbum_details")
 
     assert len(slept) == API_RETRIES - 1
+
+
+@responses.activate
+def test_band_details_failure_is_reported_as_no_discography(caplog):
+    add_redirect_loop("loopy")
+    responses.add(responses.POST, SEARCH_API, json=SEARCH)
+    responses.add(responses.POST, f"{MOBILE_API}/band_details", status=500)
+
+    assert Bandcamp().get_full_discography("loopy", "music") == []
+    assert "Could not fetch discography for loopy from the mobile API" in caplog.text
+
+
+@responses.activate
+def test_one_failing_release_does_not_drop_the_others(caplog):
+    band = {"discography": [{"item_id": 8, "item_type": "album", "band_id": 42, "title": "Broken"},
+                            {"item_id": 7, "item_type": "album", "band_id": 42, "title": "First"}]}
+    add_redirect_loop("loopy")
+    responses.add(responses.POST, SEARCH_API, json=SEARCH)
+    responses.add(responses.POST, f"{MOBILE_API}/band_details", json=band)
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details?band_id=42&tralbum_type=a"
+                                f"&tralbum_id=8", status=500)
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details", json=TRALBUM)
+
+    assert Bandcamp().get_full_discography("loopy", "music") == [ALBUM_URL]
+    assert "Skipping Broken, mobile API request failed" in caplog.text
+
+
+@responses.activate
+def test_a_release_the_api_does_not_list_is_reported_as_missing(capsys):
+    add_redirect_loop("loopy")
+    responses.add(responses.POST, SEARCH_API, json=SEARCH)
+    responses.add(responses.POST, f"{MOBILE_API}/band_details", json={"discography": []})
+
+    with pytest.raises(SystemExit) as exit_info:
+        Bandcamp().parse("https://loopy.bandcamp.com/album/first")
+
+    assert exit_info.value.code == 2
+    assert (f"The Album/Track requested does not exist at: "
+            f"https://loopy.bandcamp.com/album/first") in capsys.readouterr().out
+
+
+@responses.activate
+def test_the_api_fallback_says_lyrics_are_unavailable(caplog):
+    add_redirect_loop("loopy")
+    add_api()
+
+    album = Bandcamp().parse("https://loopy.bandcamp.com/album/first", lyrics=True)
+
+    assert "lyrics" not in album["tracks"][0]
+    assert "Track lyrics are not available" in caplog.text

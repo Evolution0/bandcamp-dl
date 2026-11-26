@@ -187,7 +187,9 @@ def main():
             sys.stderr.write("Some albums could not be downloaded, see the messages above.\n")
             sys.exit(1)
     else:
-        logger.debug(r" /!\ Something went horribly wrong /!\ ")
+        # Unreachable: a run without a URL or an --artist already exited in the argument
+        # check above, so no test can get here and coverage would report it as a gap
+        logger.debug(r" /!\ Something went horribly wrong /!\ ")  # pragma: no cover
 
 
 if __name__ == '__main__':

@@ -1,7 +1,10 @@
+import pathlib
+import runpy
 import sys
 
 import pytest
 
+from bandcamp_dl import __version__
 from bandcamp_dl import __main__ as entry_point
 from bandcamp_dl.bandcamp import Bandcamp
 from bandcamp_dl.bandcampdownloader import BandcampDownloader
@@ -80,3 +83,105 @@ def test_a_failed_album_exits_nonzero(downloaded, monkeypatch):
         run(monkeypatch, "https://a.bandcamp.com/album/first")
 
     assert exit_info.value.code == 1
+
+
+@pytest.fixture
+def configs(tmp_path, monkeypatch, downloaded):
+    """Keep the argument namespace each album was downloaded with"""
+    kept = []
+
+    def record_start(self, album):
+        kept.append(self.config)
+        downloaded.append(album["url"])
+
+    monkeypatch.setattr(BandcampDownloader, "start", record_start)
+    monkeypatch.setattr(config_module, "USER_HOME", tmp_path)
+    return kept
+
+
+def test_the_version_flag_prints_the_version_and_stops(capsys, monkeypatch):
+    run(monkeypatch, "--version")
+
+    assert capsys.readouterr().out == f"bandcamp-dl {__version__}\n"
+
+
+def test_debug_sends_the_chatter_to_the_log(downloaded, monkeypatch, caplog):
+    def parse_with_chatter(self, url, *args):
+        self.logger.debug("parsing %s", url)
+        return make_album(url)
+
+    monkeypatch.setattr(Bandcamp, "parse", parse_with_chatter)
+
+    run(monkeypatch, "--debug", "https://a.bandcamp.com/album/first")
+
+    assert "parsing https://a.bandcamp.com/album/first" in caplog.text
+
+
+def test_without_a_url_or_an_artist_the_usage_is_printed(monkeypatch, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        run(monkeypatch)
+
+    assert exit_info.value.code == 2
+    captured = capsys.readouterr()
+    assert "usage:" in captured.out
+    assert "required: URL or --artist" in captured.err
+
+
+def test_a_track_slug_with_an_artist_downloads_that_one_track(downloaded, monkeypatch):
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "--artist", "loopy", "--track", "one")
+
+    assert downloaded == ["https://loopy.bandcamp.com/track/one"]
+
+
+def test_an_artist_alone_downloads_their_whole_discography(downloaded, monkeypatch):
+    monkeypatch.setattr(Bandcamp, "get_full_discography",
+                        lambda self, name, page_type: [f"https://{name}.bandcamp.com/album/{slug}"
+                                                       for slug in ("one", "two")])
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "--artist", "loopy")
+
+    assert downloaded == ["https://loopy.bandcamp.com/album/one",
+                         "https://loopy.bandcamp.com/album/two"]
+
+
+def test_an_artist_page_url_is_expanded_before_downloading(downloaded, monkeypatch):
+    monkeypatch.setattr(Bandcamp, "get_full_discography",
+                        lambda self, name, page_type: [f"https://{name}.bandcamp.com/album/one"])
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "https://loopy.bandcamp.com/music")
+
+    assert downloaded == ["https://loopy.bandcamp.com/album/one"]
+
+
+def test_a_url_that_is_not_an_album_or_a_track_is_left_alone(downloaded, monkeypatch):
+    merch_only = ["https://a.bandcamp.com/merch/shirt"]
+    monkeypatch.setattr(Bandcamp, "get_playlist", lambda self, url: merch_only)
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "https://a.bandcamp.com/playlist/mix")
+
+    assert downloaded == []
+
+
+def test_an_empty_option_falls_back_to_the_configured_default(configs, monkeypatch):
+    # --base-dir '' is what a wrapper script with an unset variable leaves behind
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "--base-dir", "", "--template", "", "https://a.bandcamp.com/album/first")
+
+    assert configs[0].base_dir == config_module.USER_HOME
+    assert configs[0].template == config_module.TEMPLATE
+
+
+def test_the_console_entry_point_runs_main(tmp_path, capsys, monkeypatch):
+    # `python -m bandcamp_dl` executes this module as __main__; the guard has to keep working
+    monkeypatch.setattr(config_module, "CONFIG_PATH", tmp_path / "bandcamp-dl.json")
+    monkeypatch.setattr(sys, "argv", ["bandcamp-dl", "--version"])
+
+    runpy.run_path(str(pathlib.Path(entry_point.__file__)), run_name="__main__")
+
+    assert capsys.readouterr().out.endswith(f"bandcamp-dl {__version__}\n")

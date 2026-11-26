@@ -54,3 +54,20 @@ def test_tracks_from_short_playlists_are_left_untouched():
     responses.add(responses.GET, PLAYLIST_URL, body=playlist_page(PAGE_TRACKS[:10], 10))
 
     assert Bandcamp().get_playlist(PLAYLIST_URL) == PAGE_TRACKS[:10]
+
+
+@responses.activate
+def test_the_cursor_loop_stops_when_the_api_returns_no_more_tracks():
+    responses.add(responses.GET, PLAYLIST_URL, body=playlist_page(PAGE_TRACKS, 120))
+    responses.add(responses.POST, PLAYER_API, json={"tracklist": {"nextCursor": 99, "tracks": []}})
+
+    assert Bandcamp().get_playlist(PLAYLIST_URL) == PAGE_TRACKS
+    assert len([call for call in responses.calls if call.request.url == PLAYER_API]) == 1
+
+
+@responses.activate
+def test_tracks_from_a_disabled_band_are_dropped_from_the_queue():
+    urls = PAGE_TRACKS[:3] + ["https://gone.bandcamp.com/-disabled-/track/x"]
+    responses.add(responses.GET, PLAYLIST_URL, body=playlist_page(urls, len(urls)))
+
+    assert Bandcamp().get_playlist(PLAYLIST_URL) == PAGE_TRACKS[:3]

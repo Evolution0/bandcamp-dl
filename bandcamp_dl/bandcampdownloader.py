@@ -76,6 +76,9 @@ class BandcampDownloader:
         self.logger.debug(f"\n\tTemplate: {path}")
 
         def slugify_preset(content):
+            # album_id and track_id reach the tokens as ints from parse(), and the case options
+            # below are string operations, so whatever a token carries becomes text first
+            content = str(content)
             retain_case = case_mode != CASE_LOWER
             if case_mode == CASE_UPPER:
                 content = content.upper()
@@ -106,10 +109,16 @@ class BandcampDownloader:
             else:
                 track['track'] = str(track['track']).zfill(2)
 
+            # A token the release does not carry, e.g. the label of a release with no seller
+            # entry, contributes nothing to the path; it used to insert the word "None" there
+            value = track.get(key, "")
+            if value is None:
+                value = ""
+
             if self.config.no_slugify:
-                replacement = str(track.get(key, ""))
+                replacement = str(value)
             else:
-                replacement = slugify_preset(track.get(key, ""))
+                replacement = slugify_preset(value)
 
             path = path.replace(f'%{{{token}}}', replacement)
 

@@ -35,7 +35,8 @@ license = {text = "Unlicense"}
 [project.optional-dependencies]
 test = [
     "pytest >= 9.1.1",
-    "responses >= 0.26.3"
+    "responses >= 0.26.3",
+    "coverage >= 7.17.5",
 ]
 
 [project.scripts]
@@ -45,3 +46,12 @@ bandcamp-dl = "bandcamp_dl.__main__:main"
 Documentation = "https://github.com/evolution0/bandcamp-dl/blob/master/README.rst"
 Source = "https://github.com/evolution0/bandcamp-dl"
 Tracker = "https://github.com/evolution0/bandcamp-dl/issues"
+
+[tool.coverage.run]
+source = ["bandcamp_dl"]
+
+[tool.coverage.report]
+# The suite is kept at full statement coverage: a line nobody can reach carries a
+# `# pragma: no cover` naming the reason, anything else is a missing test
+fail_under = 100
+precision = 0
