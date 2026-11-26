@@ -3,7 +3,7 @@ import os
 import re
 
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC, TDOR, TDRL
+from mutagen.id3 import TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC
 
 from bandcamp_dl import __version__
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
