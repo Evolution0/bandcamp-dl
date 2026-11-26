@@ -1,10 +1,10 @@
 name: Run the test suite
 
 on:
-  push:
-    branches:
-      - master
   pull_request:
+  # pushes to master are covered by the "test" job of publish-to-test-pypi.yml,
+  # which gates the TestPyPI upload, so running the suite here as well would
+  # only duplicate it
 
 jobs:
   test:
