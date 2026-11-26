@@ -6,7 +6,7 @@ on:
       - master
 
 jobs:
-  build-and-publish:
+  build:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
@@ -15,17 +15,38 @@ jobs:
       uses: actions/setup-python@v7
       with:
         python-version: "3.13"
-    - name: Install dependencies
-      run: python -m pip install -U setuptools wheel build
+    # build pulls setuptools from the build-system table in an isolated environment,
+    # so the runner itself only needs the build frontend
     - name: Build a binary wheel and a source tarball
-      run: python -m build .
+      run: python -m pip install build && python -m build
+    - name: Hand the distributions to the publish job
+      uses: actions/upload-artifact@v7
+      with:
+        name: python-package-distributions
+        path: dist/
+
+  publish-to-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # the identity TestPyPI matches this run against: the publisher you registered
+    # names this repository, this workflow file and the testpypi environment
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/bandcamp-dl/
+    permissions:
+      # mandatory for trusted publishing, scoped to the job that flies the dists
+      id-token: write
+    steps:
+    - name: Download the distributions built by the build job
+      uses: actions/download-artifact@v8
+      with:
+        name: python-package-distributions
+        path: dist/
     - name: Publish distribution to TestPyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        password: ${{ secrets.TEST_PYPI_API_TOKEN }}
-        repository_url: https://test.pypi.org/legacy/
-    #- name: Publish distribution to PyPI
-    #  if: startsWith(github.ref, 'refs/tags')
-    #  uses: pypa/gh-action-pypi-publish@master
-    #  with:
-    #    password: ${{ secrets.PYPI_API_TOKEN }}
+        # no password: the OIDC token exchanged for a short-lived API token is
+        # what authenticates the upload, and with it in play the action also
+        # signs digital attestations for every file it uploads
+        repository-url: https://test.pypi.org/legacy/
