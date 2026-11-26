@@ -24,7 +24,7 @@ dependencies = [
     "demjson3 >= 3.0.6",
     "mutagen >= 1.48.1",
     "requests >= 2.34.2",
-    "unicode-slugify @ git+https://github.com/mozilla/unicode-slugify.git@refs/pull/41/head",
+    "python-slugify >= 9.2.0",
     "urllib3[socks] >= 2.8.0",
     "requests-ratelimiter >= 0.10.0",
     "rich >= 15.0.0",

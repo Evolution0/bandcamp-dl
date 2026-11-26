@@ -4,10 +4,10 @@ import re
 
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC, TDOR, TDRL
-import slugify
 
 from bandcamp_dl import __version__
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
+from bandcamp_dl.slug import slugify_name
 from bandcamp_dl.progress import make_progress
 from bandcamp_dl.session import make_session
 
@@ -84,9 +84,9 @@ class BandcampDownloader:
                 content = content.upper()
             if case_mode == CASE_CAMEL:
                 content = re.sub(r'(((?<=\s)|^|-)[a-z])', lambda x: x.group().upper(), content.lower())
-            slugged = slugify.slugify(content, ok=ok_chars, only_ascii=ascii_only,
-                                      spaces=keep_space, lower=not retain_case,
-                                      space_replacement=space_char)
+            slugged = slugify_name(content, ok=ok_chars, only_ascii=ascii_only,
+                                   spaces=keep_space, lower=not retain_case,
+                                   space_replacement=space_char)
             return slugged
 
         template_tokens = ['trackartist', 'artist', 'album', 'title', 'date', 'label', 'track', 'album_id', 'track_id']
