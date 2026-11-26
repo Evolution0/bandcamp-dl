@@ -30,7 +30,7 @@ If possible after running the command with the --debug option.
 **Desktop (please complete the following information):**
  - OS: [e.g. Windows, Ubuntu, Mac]
  - Version [e.g. Windows 10 20H2, Ubuntu 20.04, MacOS 11 (Big Sur)]
- - Python Version [e.g. 2.7, 3.9]
+ - Python Version [e.g. 3.13]
 
 **Additional context**
 Add any other context about the problem here.

@@ -11,19 +11,6 @@ def write_config(tmp_path, contents):
     return path
 
 
-def test_a_partial_config_is_a_partial_config(tmp_path, monkeypatch):
-    # Config(dict_) skips the defaults entirely: only the given options exist, and they are
-    # what gets written out on a first run
-    path = tmp_path / "bandcamp-dl.json"
-    monkeypatch.setattr(config_module, "CONFIG_PATH", path)
-
-    conf = config_module.Config({"template": "%{album}"})
-
-    assert conf.template == "%{album}"
-    assert "case_mode" not in conf
-    assert json.loads(path.read_text(encoding="utf-8")) == {"template": "%{album}"}
-
-
 def test_a_read_only_config_file_is_still_read(tmp_path, monkeypatch, capsys):
     path = write_config(tmp_path, {"template": "%{album}"})
     real_access = os.access
@@ -34,11 +21,11 @@ def test_a_read_only_config_file_is_still_read(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(config_module, "CONFIG_PATH", path)
     monkeypatch.setattr(config_module.os, "access", read_only)
 
-    conf = config_module.Config()
+    conf = config_module.load()
 
-    assert conf.touch is False
     assert conf.template == "%{album}"
     assert "The config file is not writable." in capsys.readouterr().err
+    # the file needs updating and is left exactly as it stands, not truncated
     assert json.loads(path.read_text(encoding="utf-8")) == {"template": "%{album}"}
 
 
@@ -46,7 +33,7 @@ def test_an_unknown_option_is_dropped_from_the_file(tmp_path, monkeypatch, capsy
     path = write_config(tmp_path, {"template": "%{album}", "nonsense": 1})
     monkeypatch.setattr(config_module, "CONFIG_PATH", path)
 
-    config_module.Config()
+    config_module.load()
 
     assert "Dropping unknown config option 'nonsense=1'" in capsys.readouterr().err
     assert "nonsense" not in json.loads(path.read_text(encoding="utf-8"))
@@ -56,33 +43,35 @@ def test_a_malformed_config_file_warns_but_keeps_the_defaults(tmp_path, monkeypa
     path = write_config(tmp_path, '{"template": "%{album}",,}')
     monkeypatch.setattr(config_module, "CONFIG_PATH", path)
 
-    conf = config_module.Config()
+    conf = config_module.load()
 
     assert "Malformed configuration file" in capsys.readouterr().err
     assert conf.template == config_module.TEMPLATE
     assert path.read_text(encoding="utf-8").startswith("{")
 
 
-def test_a_legacy_case_mode_migrates_back_to_keep_upper(tmp_path, monkeypatch, capsys):
-    # Someone who used a newer build wrote case_mode into a file an older build reads; the
-    # lossy warning tells them the case choice they made does not survive going backwards
-    path = write_config(tmp_path, {"case-mode": "upper"})
-    monkeypatch.setattr(config_module, "CONFIG_PATH", path)
+def test_a_forward_migration_replaces_the_old_boolean():
+    names = config_module.option_names()
 
-    conf = config_module.Config({"template": "%{album}"})
+    assert config_module.migrate_option("keep_upper", True, names) == (
+        "case_mode", config_module.CASE_NONE)
+    assert config_module.migrate_option("keep_upper", False, names) == (
+        "case_mode", config_module.CASE_LOWER)
 
-    assert conf.keep_upper is True
+
+def test_a_reverse_migration_answers_in_the_older_vocabulary(capsys):
+    # a build that has not gained case_mode yet reads a file written by one that has;
+    # the case choice it does not know cannot survive going backwards
+    older_build = {"keep_upper"}
+
+    assert config_module.migrate_option("case_mode", "upper", older_build) == ("keep_upper", True)
     assert "lossy reverse migration" in capsys.readouterr().err
-    assert json.loads(path.read_text(encoding="utf-8")) == {"template": "%{album}",
-                                                           "keep-upper": True}
 
 
-def test_a_reverse_migration_of_the_default_case_is_not_lossy(tmp_path, monkeypatch, capsys):
-    path = write_config(tmp_path, {"case-mode": "lower"})
-    monkeypatch.setattr(config_module, "CONFIG_PATH", path)
-
-    conf = config_module.Config({"template": "%{album}"})
-
-    assert conf.keep_upper is False
+def test_a_reverse_migration_of_the_default_case_is_not_lossy(capsys):
+    assert config_module.migrate_option("case_mode", "lower", {"keep_upper"}) == ("keep_upper", False)
     assert "lossy" not in capsys.readouterr().err
-    assert json.loads(path.read_text(encoding="utf-8"))["keep-upper"] is False
+
+
+def test_an_option_that_is_not_a_rename_is_not_migrated():
+    assert config_module.migrate_option("nonsense", 1, config_module.option_names()) is None

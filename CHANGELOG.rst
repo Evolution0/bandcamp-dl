@@ -79,3 +79,8 @@ Unreleased
   updates in place, with a spinner, bar, size and speed, then ✔ or ✘. Use
   ``--progress plain`` for the previous single-line output. Adds the
   ``rich`` dependency.
+- [Note] ``bandcamp_dl.config.load()`` now reads the config file and returns
+  the options as a dataclass; the run bookkeeping is no longer stored beside
+  the options and so never needs filtering out on the way to the file. Two
+  startup lines changed: "Config dir exists." now says "Config file exists."
+  and opening the file no longer names the mode it was opened in.
