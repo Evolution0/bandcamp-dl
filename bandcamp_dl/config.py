@@ -1,11 +1,18 @@
-import argparse
+"""The options bandcamp-dl runs with, where they are stored, and how renamed
+options move between builds that know different names for the same setting.
+
+One field per option, the value a first run writes out being the default.
+The file spells the names with hyphens, the code with underscores, so the
+two are mapped at the read/write boundary and nowhere in between.
+"""
+
 import json
-import logging
 import os
 import pathlib
 import sys
+from dataclasses import dataclass, fields
 
-from bandcamp_dl import __version__
+from bandcamp_dl.progress import PROGRESS_AUTO
 
 TEMPLATE = '%{artist}/%{album}/%{track} - %{title}'
 OK_CHARS = '-_~'
@@ -18,141 +25,151 @@ USER_HOME = pathlib.Path.home()
 # For Linux/BSD https://www.freedesktop.org/wiki/Software/xdg-user-dirs/
 # For Windows and MacOS .appname is fine
 CONFIG_PATH = USER_HOME / (".config" if os.name == "posix" else ".bandcamp-dl") / "bandcamp-dl.json"
-OPTION_MIGRATION_FORWARD = "forward"
-OPTION_MIGRATION_REVERSE = "reverse"
 
 
-class Config(dict):
+@dataclass
+class Config:
+    """the option set as this build understands it"""
 
-    # TODO: change this to dataclass when support for Python < 3.7 is dropped
-    _defaults = {"base_dir": str(USER_HOME),  # TODO: pass the Path object instead?
-                 "template": TEMPLATE,
-                 "overwrite": False,
-                 "retag": False,
-                 "no_art": False,
-                 "embed_art": False,
-                 "embed_lyrics": False,
-                 "group": False,
-                 "no_slugify": False,
-                 "ok_chars": OK_CHARS,
-                 "space_char": SPACE_CHAR,
-                 "ascii_only": False,
-                 "keep_spaces": False,
-                 "case_mode": CASE_LOWER,
-                 "no_confirm": False,
-                 "debug": False,
-                 "embed_genres": False,
-                 "cover_quality": 0,
-                 "untitled_path_from_slug": False,
-                 "truncate_album": 0,
-                 "truncate_track": 0,
-                 "limit_req_per_minute": 0,
-                 "progress": "auto"}
+    base_dir: str = str(USER_HOME)  # TODO: pass the Path object instead?
+    template: str = TEMPLATE
+    overwrite: bool = False
+    retag: bool = False
+    no_art: bool = False
+    embed_art: bool = False
+    embed_lyrics: bool = False
+    group: bool = False
+    no_slugify: bool = False
+    ok_chars: str = OK_CHARS
+    space_char: str = SPACE_CHAR
+    ascii_only: bool = False
+    keep_spaces: bool = False
+    case_mode: str = CASE_LOWER
+    no_confirm: bool = False
+    debug: bool = False
+    embed_genres: bool = False
+    cover_quality: int = 0
+    untitled_path_from_slug: bool = False
+    truncate_album: int = 0
+    truncate_track: int = 0
+    limit_req_per_minute: int = 0
+    progress: str = PROGRESS_AUTO
 
-    def __init__(self, dict_=None):
-        if dict_ is None:
-            super().__init__(**Config._defaults)
+
+def option_names() -> set[str]:
+    """the option names this build stores, spelled the way the code spells them
+
+    :return: the field names of Config, with underscores
+    """
+    return {field.name for field in fields(Config)}
+
+
+def migrate_option(key: str, val: object, known: set[str]) -> tuple[str, object] | None:
+    """translate an option this build does not store into the one it does
+
+    the direction follows from which name of a rename ``known``, the option set
+    of the build doing the migrating, carries: an older file's option is brought
+    forward, a newer file's option is answered in the older vocabulary. Either
+    way the returned name is one the migrating build stores, so the caller can
+    hold it on the Config it is building and write it back out.
+
+    :param key: the option name read from the file
+    :param val: the value it carries there
+    :param known: the option names of the build doing the migrating
+    :return: the (name, value) to store instead, None when this name is not a rename
+    """
+    if key == "keep_upper" and "case_mode" in known:
+        # forward migration: the old boolean picked between two of the new cases
+        return "case_mode", (CASE_NONE if val else CASE_LOWER)
+    if key == "case_mode" and "keep_upper" in known:
+        # reverse migration: this build has not gained case_mode yet, so it
+        # answers with keep_upper, and only the lower/none split survives
+        if val in (CASE_UPPER, CASE_CAMEL):
+            sys.stderr.write(f"Warning, lossy reverse migration, new value '{val}' is not backwards compatible\n")
+        return "keep_upper", val != CASE_LOWER
+    return None
+
+
+def _sanity_check() -> tuple[bool, bool]:
+    """look at the config file without reading it
+
+    :return: (first_run, writable), whether the file must be created and
+             whether it can be written to at all
+    """
+    if CONFIG_PATH.exists():
+        sys.stderr.write("Config file exists.\n")
+        if os.access(CONFIG_PATH, os.W_OK):
+            sys.stderr.write("The config file is writable.\n")
+            return False, True
+        sys.stderr.write("The config file is not writable.\n")
+        return False, False
+    return True, True
+
+
+def _as_json(conf: Config) -> dict[str, object]:
+    """the options of a Config as the file stores them, with hyphenated keys
+
+    :param conf: the options to store
+    :return: the JSON-ready mapping
+    """
+    return {name.replace('_', '-'): getattr(conf, name) for name in option_names()}
+
+
+def _write(conf: Config) -> None:
+    """store a Config in the config file
+
+    :param conf: the options to store
+    """
+    with pathlib.Path.open(CONFIG_PATH, 'w') as fobj:
+        json.dump(_as_json(conf), fobj)
+
+
+def load() -> Config:
+    """read the config file, creating it on a first run and updating it when
+    the file holds options this build names differently, does not know or is
+    missing
+
+    :return: the options as this build understands them
+    """
+    conf = Config()
+    first_run, writable = _sanity_check()
+    names = option_names()
+
+    if first_run:
+        sys.stderr.write("No config found - populate it with the defaults.\n")
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        _write(conf)
+        sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
+        return conf
+
+    sys.stderr.write(f"Opening config file `{CONFIG_PATH}'\n")
+    try:
+        with pathlib.Path.open(CONFIG_PATH, 'r') as fobj:
+            user_options = {key.replace('-', '_'): value
+                            for key, value in json.load(fobj).items()}
+    except json.JSONDecodeError:
+        sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
+        return conf
+
+    modified = False
+    for key, val in user_options.items():
+        if key in names:
+            setattr(conf, key, val)
+            continue
+        migrated = migrate_option(key, val, names)
+        if migrated is None:
+            sys.stderr.write(f"Dropping unknown config option '{key}={val}'\n")
         else:
-            super().__init__(**dict_)
-        self.__dict__ = self
-        self.first_run = True
-        self._read_write_config()
+            name, value = migrated
+            sys.stderr.write(f"Migration of config option: '{key}={val}' -> '{name}={value}'\n")
+            setattr(conf, name, value)
+        modified = True
 
-    def _sanity_check(self):
-        if CONFIG_PATH.exists():
-            sys.stderr.write("Config dir exists.\n")
-            if os.access(CONFIG_PATH, os.W_OK):
-                sys.stderr.write("The config file is writable.\n")
-                self.first_run = False
-                self.touch = True
-            else:
-                sys.stderr.write("The config file is not writable.\n")
-                self.first_run = False
-                self.touch = False
-        else:
-            self.first_run = True
-            self.touch = True
-
-    def _read_write_config(self):
-        self._sanity_check()
-        if self.touch:
-            file_mode = 'r+'
-        else:
-            file_mode = 'r'
-
-        if self.first_run:
-            sys.stderr.write("No config found - populate it with the defaults.\n")
-            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
-            with pathlib.Path.open(CONFIG_PATH, mode="w") as fobj:
-                json.dump(self._as_json(), fobj)
-            sys.stderr.write(f"Configuration has been written to `{CONFIG_PATH}'.\n")
-        else:
-            sys.stderr.write(f"Opening config file `{CONFIG_PATH}` as {file_mode}\n")
-            with pathlib.Path.open(CONFIG_PATH, file_mode) as fobj:
-                try:
-                    user_config = json.load(fobj)
-                    # change hyphen with underscore
-                    user_config = {k.replace('-', '_'): v for k, v in user_config.items()}
-                    if self._update_with_dict(user_config) or \
-                            set(user_config.keys()).difference(set(self.keys())) or \
-                            set(self._defaults).difference(set(user_config.keys())):
-                        # overwrite defaults with user provided config
-                        sys.stderr.write("Modifying config file.\n")
-                        # persist migrated options, removal of unsupported options, or missing
-                        # options with their defaults
-                        if self.touch:
-                            sys.stderr.write(f"Modified configuration has been written to "
-                                                f"`{CONFIG_PATH}'.\n")
-                            fobj.seek(0)  # r/w mode
-                            fobj.truncate()  # r/w mode
-                            json.dump(self._as_json(), fobj)
-                except json.JSONDecodeError:
-                    sys.stderr.write(f"Malformed configuration file `{CONFIG_PATH}'. Check json syntax.\n")
-
-    def _as_json(self):
-        """the config options as they are stored in the file, with hyphenated keys
-
-           this class maps its own __dict__ onto itself, so the run bookkeeping attributes
-           (first_run / touch) sit in the same dict as the options and must not be written out
-           as if they were settings"""
-        return {k.replace('_', '-'): v for k, v in self.items()
-                if k not in ('first_run', 'touch')}
-
-    def _update_with_dict(self, dict_):
-        """update this config instance with the persisted key-value
-           set, migrating or dropping any unknown options and returning
-           true when the underlying config needs updating"""
-        modified = False
-        for key, val in dict_.items():
-            if key not in self:
-                modified = True
-                if not self._migrate_option(key, val):
-                    sys.stderr.write(f"Dropping unknown config option '{key}={val}'\n")
-                continue
-            self[key] = val
-        return modified
-
-    def _migrate_option(self, key, val):
-        """where supported, migrate legacy options and their values
-           to update this config instance's new option, returning
-           true / false to indicate whether or not this key was
-           supported"""
-        migration_type = migration_key = migration_val = None
-        if key == "keep_upper":
-            # forward migration
-            migration_type = OPTION_MIGRATION_FORWARD
-            migration_key = "case_mode"
-            migration_val = self.case_mode = CASE_NONE if val else CASE_LOWER
-        elif key == "case_mode":
-            # reverse migration
-            migration_type = OPTION_MIGRATION_REVERSE
-            migration_key = "keep_upper"
-            migration_val = self.keep_upper = False if val == CASE_LOWER else True
-            if val in [CASE_UPPER, CASE_CAMEL]:
-                sys.stderr.write(f"Warning, lossy reverse migration, new value '{val}' is not backwards compatible\n")
-        if migration_type:
-            sys.stderr.write(f"{migration_type.capitalize()} migration of config option: '{key}={val}' -> " \
-                             f"'{migration_key}={migration_val}'\n")
-            return True
-        else:
-            return False
+    # a rewrite is also needed when the file is simply missing options this build
+    # would store, even though every option it carries is one this build knows
+    if modified or names - set(user_options):
+        sys.stderr.write("Modifying config file.\n")
+        if writable:
+            _write(conf)
+            sys.stderr.write(f"Modified configuration has been written to `{CONFIG_PATH}'.\n")
+    return conf

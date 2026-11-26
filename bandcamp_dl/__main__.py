@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 def main():
     # parse config if found, else create it
-    conf = config.Config()
+    conf = config.load()
 
     parser = argparse.ArgumentParser()
     parser.add_argument('URL', help="Bandcamp album/track URL", nargs="*")
