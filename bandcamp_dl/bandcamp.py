@@ -1,58 +1,131 @@
-from datetime import datetime as dt
+import sys
+import datetime
 import json
 import logging
+import re
+import time
 
+import bs4
 import requests
-from bs4 import BeautifulSoup
-from bs4 import FeatureNotFound
+from urllib.parse import urlparse, urljoin
 
+from bandcamp_dl import __version__
 from bandcamp_dl.bandcampjson import BandcampJSON
-from bandcamp_dl.__init__ import __version__
+from bandcamp_dl.session import make_session
 
+MOBILE_API = "https://bandcamp.com/api/mobile/24"
+SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
+API_RETRIES = 5
+PAGE_RETRIES = 5
 
 class Bandcamp:
-    def __init__(self):
-        self.headers = {'User-Agent': f'bandcamp-dl/{__version__} (https://github.com/iheanyi/bandcamp-dl)'}
+    """Core parsing logic"""
+    def __init__(self, limit_req_per_minute: int = 0, debugging: bool = False):
+        """
+        :param limit_req_per_minute: Limit the number of requests to Bandcamp's servers
+        :param debugging: Toggle verbose logging
+        """
+        self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
+                        f'(https://github.com/evolution0/bandcamp-dl)'}
         self.soup = None
         self.tracks = None
+        # tralbum_details responses keyed by bandcamp_url, filled by the mobile API fallback
+        self.api_tralbums = {}
+        self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
+        self.debugging = debugging
+        # Debug chatter only; warnings and errors must survive without --debug.
+        # The old `disabled = debugging` flag muted everything precisely when debugging was on.
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
+        self.session = make_session(limit_req_per_minute)
 
-    def parse(self, url: str, art: bool = True, lyrics: bool = False, debugging: bool = False) -> dict or None:
+    def parse(self, url: str, art: bool = True, lyrics: bool = False, genres: bool = False,
+              cover_quality: int = 0) -> dict | None:
         """Requests the page, cherry-picks album info
 
         :param url: album/track url
         :param art: if True download album art
         :param lyrics: if True fetch track lyrics
-        :param debugging: if True then verbose output
+        :param genres: if True fetch track tags
+        :param cover_quality: Cover image quality, 0 being source, 10 (1200x1200), 16 (700x700), defaults to 0
         :return: album metadata
         """
-        if debugging:
-            logging.basicConfig(level=logging.DEBUG)
+
+        if url in self.api_tralbums:
+            return self.parse_api_tralbum(self.api_tralbums[url], url, art, lyrics, genres,
+                                          cover_quality)
 
         try:
-            response = requests.get(url, headers=self.headers)
+            response = self.get_page(url)
         except requests.exceptions.MissingSchema:
             return None
+        except requests.exceptions.TooManyRedirects:
+            return self.parse_via_api(url, art, lyrics, genres, cover_quality)
+
+        if not response.ok:
+            self.logger.debug(" Status code: %s", response.status_code)
+            if response.status_code == 404:
+                print(f"The Album/Track requested does not exist at: {url}")
+            else:
+                print(f"Could not fetch {url}: HTTP {response.status_code}")
+            sys.exit(2)
+
 
         try:
-            self.soup = BeautifulSoup(response.text, "lxml")
-        except FeatureNotFound:
-            self.soup = BeautifulSoup(response.text, "html.parser")
+            self.soup = bs4.BeautifulSoup(response.text, "lxml")
+        except bs4.FeatureNotFound:
+            self.soup = bs4.BeautifulSoup(response.text, "html.parser")
 
-        logging.debug(" Generating BandcampJSON..")
-        bandcamp_json = BandcampJSON(self.soup, debugging).generate()
+        self.logger.debug(" Generating BandcampJSON..")
+        bandcamp_json = BandcampJSON(self.soup, self.debugging).generate()
         page_json = {}
         for entry in bandcamp_json:
             page_json = {**page_json, **json.loads(entry)}
-        logging.debug(" BandcampJSON generated..")
+        self.logger.debug(" BandcampJSON generated..")
 
-        logging.debug(" Generating Album..")
+        self.logger.debug(" Generating Album..")
         self.tracks = page_json['trackinfo']
 
+        track_ids = {}
+        if 'track' in page_json and 'itemListElement' in page_json['track']:
+            for item in page_json['track']['itemListElement']:
+                track_url = item['item'].get('@id')
+                if track_url is None:
+                    self.logger.warning('Track URL is missing, skipping...')
+                    continue
+                for prop in item['item'].get('additionalProperty', []):
+                    if prop.get('name') == 'track_id':
+                        track_ids[track_url] = prop.get('value')
+                        break
+
+        track_nums = [track['track_num'] for track in self.tracks]
+        if len(track_nums) != len(set(track_nums)):
+            self.logger.debug(" Duplicate track numbers found, re-numbering based on position..")
+            track_positions = {}
+            if 'track' in page_json and 'itemListElement' in page_json['track']:
+                for item in page_json['track']['itemListElement']:
+                    track_url = item['item']['@id']
+                    position = item['position']
+                    track_positions[track_url] = position
+
+            if "/track/" in page_json['url']:
+                artist_url = page_json['url'].rpartition('/track/')[0]
+            else:
+                artist_url = page_json['url'].rpartition('/album/')[0]
+
+            for track in self.tracks:
+                full_track_url = f"{artist_url}{track['title_link']}"
+                if full_track_url in track_positions:
+                    track['track_num'] = track_positions[full_track_url]
+                else:
+                    self.logger.debug(f" Could not find position for track: {full_track_url}")
+                    track['track_num'] = self.tracks.index(track) + 1
+        
         album_release = page_json['album_release_date']
         if album_release is None:
             album_release = page_json['current']['release_date']
             if album_release is None:
-                album_release = page_json['current']['publish_date']
+                album_release = page_json['embed_info']['item_public']
+
         try:
             album_title = page_json['current']['title']
         except KeyError:
@@ -63,6 +136,29 @@ class Bandcamp:
         except KeyError:
             label = None
 
+        album_id = None
+        track_id_from_music_recording = None
+
+        if page_json.get('@type') == 'MusicRecording':
+            if 'additionalProperty' in page_json:
+                for prop in page_json['additionalProperty']:
+                    if prop.get('name') == 'track_id':
+                        track_id_from_music_recording = prop.get('value')
+                        album_id = track_id_from_music_recording
+                        self.logger.debug(f" Single track page, found track_id: {track_id_from_music_recording}")
+                        break
+        elif page_json.get('@type') == 'MusicAlbum':
+            if 'albumRelease' in page_json:
+                for release in page_json['albumRelease']:
+                    if 'additionalProperty' in release:
+                        for prop in release['additionalProperty']:
+                            if prop.get('name') == 'item_id':
+                                album_id = prop.get('value')
+                                self.logger.debug(f" Album page, found album_id: {album_id}")
+                                break
+                    if album_id:
+                        break
+
         album = {
             "tracks": [],
             "title": album_title,
@@ -70,45 +166,78 @@ class Bandcamp:
             "label": label,
             "full": False,
             "art": "",
-            "date": str(dt.strptime(album_release, "%d %b %Y %H:%M:%S GMT").year),
-            "url": url
+            "date": str(datetime.datetime.strptime(album_release, "%d %b %Y %H:%M:%S GMT").year),
+            "url": url,
+            "genres": "",
+            "album_id": album_id
         }
 
-        if "track" in page_json['url']:
+        if "/track/" in page_json['url']:
             artist_url = page_json['url'].rpartition('/track/')[0]
         else:
             artist_url = page_json['url'].rpartition('/album/')[0]
 
         for track in self.tracks:
+            full_track_url = f"{artist_url}{track['title_link']}"
+            if track_id_from_music_recording:
+                track['track_id'] = track_id_from_music_recording
+            else:
+                track['track_id'] = track_ids.get(full_track_url)
+
             if lyrics:
-                track['lyrics'] = self.get_track_lyrics(f"{artist_url}{track['title_link']}#lyrics")
+                track['lyrics'] = self.get_track_lyrics(f"{artist_url}"
+                                                        f"{track['title_link']}#lyrics")
+
             if track['file'] is not None:
                 track = self.get_track_metadata(track)
                 album['tracks'].append(track)
 
         album['full'] = self.all_tracks_available()
         if art:
-            album['art'] = self.get_album_art()
+            album['art'] = self.get_album_art(cover_quality)
+        if genres:
+            album['genres'] = "; ".join(page_json['keywords'])
 
-        logging.debug(" Album generated..")
-        logging.debug(f" Album URL: {album['url']}")
+        self.logger.debug(" Album generated..")
+        self.logger.debug(" Album URL: %s", album['url'])
 
         return album
 
+    def get_page(self, url: str) -> requests.Response:
+        """GET a page, waiting and retrying while Bandcamp rate limits us (HTTP 429)
+
+        :param url: page url
+        :return: the last response, which may still be an error
+        """
+        for attempt in range(PAGE_RETRIES):
+            response = self.session.get(url, headers=self.headers)
+            if response.status_code != 429:
+                break
+            if attempt == PAGE_RETRIES - 1:
+                # Out of retries: report the rate limiting instead of stalling first
+                print(f"Still rate limited by Bandcamp after {PAGE_RETRIES} attempts..")
+                break
+            # Retry-After may be missing or an HTTP date; back off exponentially then
+            retry_after = response.headers.get('Retry-After', '')
+            delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+            print(f"Rate limited by Bandcamp, retrying in {delay}s..")
+            time.sleep(delay)
+        return response
+
     def get_track_lyrics(self, track_url):
-        logging.debug(" Fetching track lyrics..")
-        track_page = requests.get(track_url, headers=self.headers)
+        self.logger.debug(" Fetching track lyrics..")
+        track_page = self.get_page(track_url)
         try:
-            track_soup = BeautifulSoup(track_page.text, "lxml")
-        except FeatureNotFound:
-            track_soup = BeautifulSoup(track_page.text, "html.parser")
+            track_soup = bs4.BeautifulSoup(track_page.text, "lxml")
+        except bs4.FeatureNotFound:
+            track_soup = bs4.BeautifulSoup(track_page.text, "html.parser")
         track_lyrics = track_soup.find("div", {"class": "lyricsText"})
         if track_lyrics:
-            logging.debug(" Lyrics retrieved..")
+            self.logger.debug(" Lyrics retrieved..")
             return track_lyrics.text
         else:
-            logging.debug(" Lyrics not found..")
-            return "lyrics unavailable"
+            self.logger.debug(" Lyrics not found..")
+            return ""
 
     def all_tracks_available(self) -> bool:
         """Verify that all tracks have a url
@@ -120,18 +249,19 @@ class Bandcamp:
                 return False
         return True
 
-    @staticmethod
-    def get_track_metadata(track: dict or None) -> dict:
+    def get_track_metadata(self, track: dict | None) -> dict:
         """Extract individual track metadata
 
         :param track: track dict
         :return: track metadata dict
         """
-        logging.debug(" Generating track metadata..")
+        self.logger.debug(" Generating track metadata..")
         track_metadata = {
             "duration": track['duration'],
             "track": str(track['track_num']),
             "title": track['title'],
+            "artist": track['artist'],
+            "track_id": track.get('track_id'),
             "url": None
         }
 
@@ -144,11 +274,10 @@ class Bandcamp:
             track_metadata['url'] = None
 
         if track['has_lyrics'] is not False:
-            if track['lyrics'] is None:
-                track['lyrics'] = "lyrics unavailable"
-            track_metadata['lyrics'] = track['lyrics'].replace('\\r\\n', '\n')
+            if track['lyrics'] is not None:
+                track_metadata['lyrics'] = track['lyrics'].replace('\\r\\n', '\n')
 
-        logging.debug(" Track metadata generated..")
+        self.logger.debug(" Track metadata generated..")
         return track_metadata
 
     @staticmethod
@@ -160,15 +289,287 @@ class Bandcamp:
         :param page_type: Type of page album/track
         :return: url as str
         """
-        return f"http://{artist}.bandcamp.com/{page_type}/{slug}"
+        return f"https://{artist}.bandcamp.com/{page_type}/{slug}"
 
-    def get_album_art(self) -> str:
+    def get_album_art(self, quality: int = 0) -> str:
         """Find and retrieve album art url from page
 
-        :return: url as str
+        :param quality: The quality of the album art to retrieve
+        :return: url as str, empty if the page carries no cover
         """
         try:
             url = self.soup.find(id='tralbumArt').find_all('a')[0]['href']
+        except (AttributeError, IndexError):
+            self.logger.debug(" Album art not found on the page..")
+            return ""
+        # Bandcamp puts the size in the last path segment: a1234567890_10.jpg
+        stem, separator, suffix = url.rpartition('_')
+        if not separator or not re.fullmatch(r'\d+\.(jpg|jpeg|png)', suffix, re.IGNORECASE):
+            self.logger.debug(f" Cover url {url} has no quality token to swap, using it as is")
             return url
-        except None:
-            pass
+        return f"{stem}_{quality}{suffix[suffix.rindex('.'):]}"
+
+    def get_full_discography(self, name: str, page_type: str) -> list:
+        """Generate a list of album and track urls based on the artist/label name
+
+        :param name: artist/label name
+        :param page_type: Type of page, it should be music but it's a parameter so it's not
+                          hardcoded
+        :return: urls as list of strs
+        """
+
+        album_urls = set()
+
+        print(f"Found artist page, fetching full discography for: {name}")
+        music_page_url = f"https://{name}.bandcamp.com/{page_type}"
+        self.logger.info(f"Scraping discography from: {music_page_url}")
+
+        try:
+            response = self.get_page(music_page_url)
+        except requests.exceptions.TooManyRedirects:
+            self.logger.warning(f"{music_page_url} is stuck in a redirect loop, "
+                                f"falling back to Bandcamp's mobile API")
+            return self.get_api_discography(name)
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Could not fetch artist/label page {music_page_url}: {e}")
+            return []
+
+        if not response.ok:
+            # Fail loudly: an error page has no music grid and would look like an empty discography
+            print(f"Could not fetch {music_page_url}: HTTP {response.status_code}")
+            sys.exit(2)
+
+        try:
+            soup = bs4.BeautifulSoup(response.text, "lxml")
+        except bs4.FeatureNotFound:
+            soup = bs4.BeautifulSoup(response.text, "html.parser")
+
+        music_grid = soup.find('ol', {'id': 'music-grid'})
+        if not music_grid:
+            self.logger.warning("Could not find music grid on the page. No albums found.")
+
+        try:
+            if 'data-client-items' in music_grid.attrs:
+                self.logger.debug("Found data-client-items attribute. Parsing for album URLs.")
+                try:
+                    json_string = bs4.BeautifulSoup(music_grid['data-client-items'], "html.parser").text
+                    items = json.loads(json_string)
+                    for item in items:
+                        if 'page_url' in item:
+                            full_url = urljoin(music_page_url, item['page_url'])
+                            album_urls.add(full_url)
+                except (json.JSONDecodeError, TypeError) as e:
+                    self.logger.error(f"Failed to parse data-client-items JSON: {e}")
+            # Releases can be listed as grid links, in data-client-items, or both
+            self.logger.debug("Scraping all <li> elements in the music grid for links.")
+            for a in music_grid.select('li.music-grid-item a'):
+                href = a.get('href')
+                if href:
+                    album_urls.add(urljoin(music_page_url, href))
+        except AttributeError:
+            # This is slow for some reason, needs work
+            self.logger.warning("Retrying as a Label page.")
+            is_label = soup.find('script', {'id': 'band-menuitem-template'})
+            if is_label:
+                music_grid = soup.select('div.ipCellLabel1 a')
+                for a in music_grid:
+                    href = a.get('href')
+                    if href:
+                        # Only need this for truncated links, some are already complete so first verify.
+                        if urlparse(href).scheme in ('http', 'https'):
+                            # Apparently artists that are deleted/disabled have these modified links?
+                            if '-disabled-' not in href:
+                                album_urls.add(href)
+                        else:
+                            full_url = urljoin(music_page_url, href)
+                            album_urls.add(full_url)
+            else:
+                return []
+        self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
+        return list(album_urls)
+
+    # Mobile API fallback: some artists' pages redirect forever between
+    # name.bandcamp.com and a broken custom domain, but the JSON API still answers.
+
+    def api_request(self, method: str, url: str, **kwargs) -> dict:
+        for attempt in range(API_RETRIES):
+            response = self.session.request(method, url, headers=self.headers, **kwargs)
+            if response.status_code != 429:
+                break
+            if attempt == API_RETRIES - 1:
+                # Out of retries: raise_for_status below reports the rate limiting
+                self.logger.debug(f"Still rate limited by the mobile API after {API_RETRIES} attempts")
+                break
+            # Retry-After may be missing or an HTTP date; back off exponentially then
+            retry_after = response.headers.get('Retry-After', '')
+            delay = int(retry_after) if retry_after.isdigit() else 2 ** (attempt + 1)
+            self.logger.debug(f"Rate limited by the mobile API, retrying in {delay}s")
+            time.sleep(delay)
+        response.raise_for_status()
+        return response.json()
+
+    def find_band_id(self, name: str) -> int | None:
+        """Look up a band ID by its bandcamp.com subdomain name
+
+        :param name: artist/label subdomain name
+        :return: band ID, or None if no matching band was found
+        """
+        hosts = {f"{name}.bandcamp.com"}
+        # Search results list custom-domain artists under that domain, so also trust
+        # exactly the host that name.bandcamp.com redirects to
+        location = self.session.request("GET", f"https://{name}.bandcamp.com/",
+                                        headers=self.headers,
+                                        allow_redirects=False).headers.get('Location')
+        if location:
+            redirect_host = urlparse(location).netloc
+            if redirect_host:
+                # A relative Location has no host; an empty one would match any
+                # result that is missing item_url_root
+                hosts.add(redirect_host)
+        results = self.api_request("POST", SEARCH_API, json={
+            "search_text": name, "search_filter": "", "full_page": False})
+        for result in results.get('auto', {}).get('results', []):
+            host = urlparse(result.get('item_url_root', '')).netloc
+            if result.get('type') == 'b' and host and host in hosts:
+                return result['id']
+        return None
+
+    def get_api_discography(self, name: str, wanted_path: str | None = None) -> list:
+        """Generate a list of album and track urls through the mobile API
+
+        Caches each release's tralbum_details by its url so parse() can skip the web page.
+
+        :param name: artist/label subdomain name
+        :param wanted_path: stop once a release with this url path (e.g. /album/x) is found
+        :return: urls as list of strs
+        """
+        try:
+            band_id = self.find_band_id(name)
+            if band_id is None:
+                self.logger.error(f"Could not find a band ID for: {name}")
+                return []
+            band = self.api_request("POST", f"{MOBILE_API}/band_details",
+                                    json={"band_id": band_id})
+        except (requests.exceptions.RequestException, ValueError) as e:
+            self.logger.error(f"Could not fetch discography for {name} from the mobile API: {e}")
+            return []
+
+        urls = []
+        for item in band.get('discography', []):
+            params = {"band_id": item.get('band_id', band_id),
+                      "tralbum_type": item['item_type'][0],
+                      "tralbum_id": item['item_id']}
+            try:
+                tralbum = self.api_request("GET", f"{MOBILE_API}/tralbum_details", params=params)
+            except (requests.exceptions.RequestException, ValueError) as e:
+                self.logger.error(f"Skipping {item.get('title')}, mobile API request failed: {e}")
+                continue
+            self.api_tralbums[tralbum['bandcamp_url']] = tralbum
+            urls.append(tralbum['bandcamp_url'])
+            if wanted_path and urlparse(tralbum['bandcamp_url']).path == wanted_path:
+                break
+        self.logger.info(f"Found a total of {len(urls)} releases through the mobile API.")
+        return urls
+
+    def parse_via_api(self, url: str, art: bool, lyrics: bool, genres: bool,
+                      cover_quality: int) -> dict:
+        """Parse an album/track whose web page redirect-loops, through the mobile API"""
+        self.logger.warning(f"{url} is stuck in a redirect loop, falling back to Bandcamp's mobile API")
+        parsed_url = urlparse(url)
+        # Only look at this band's releases; the cache may hold other bands' too
+        for api_url in self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path):
+            if urlparse(api_url).path == parsed_url.path:
+                return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, lyrics,
+                                              genres, cover_quality)
+        print(f"The Album/Track requested does not exist at: {url}")
+        sys.exit(2)
+
+    def parse_api_tralbum(self, tralbum: dict, url: str, art: bool, lyrics: bool,
+                          genres: bool, cover_quality: int) -> dict:
+        """Build the same album dict as parse() from a mobile API tralbum_details response"""
+        if lyrics:
+            # tralbum_details carries no lyrics and the page that holds them is the one
+            # redirect-looping, so say so instead of quietly embedding nothing
+            self.logger.warning(f"Track lyrics are not available for {url} through the mobile API "
+                                f"fallback, skipping them")
+        all_tracks = tralbum.get('tracks', [])
+        tracks = [{"duration": track['duration'],
+                   "track": str(track['track_num']),
+                   "title": track['title'],
+                   "artist": track.get('band_name') or tralbum['tralbum_artist'],
+                   "track_id": track['track_id'],
+                   "url": track['streaming_url']['mp3-128']}
+                  for track in all_tracks if (track.get('streaming_url') or {}).get('mp3-128')]
+        release_date = tralbum.get('release_date')
+        return {
+            "tracks": tracks,
+            "title": tralbum['title'],
+            "artist": tralbum['tralbum_artist'],
+            "label": tralbum.get('label'),
+            "full": len(tracks) == len(all_tracks),
+            "art": (f"https://f4.bcbits.com/img/a{tralbum['art_id']}_{cover_quality}.jpg"
+                    if art and tralbum.get('art_id') else ""),
+            "date": (str(datetime.datetime.fromtimestamp(release_date, datetime.timezone.utc).year)
+                     if release_date else ""),
+            "url": url,
+            "genres": "; ".join(tag['name'] for tag in tralbum.get('tags', [])) if genres else "",
+            "album_id": tralbum['id'],
+        }
+
+    def get_playlist(self, playlist_url: str) -> list:
+        playlist = self.get_page(playlist_url)
+        try:
+            playlist_soup = bs4.BeautifulSoup(playlist.text, "lxml")
+        except bs4.FeatureNotFound:
+            playlist_soup = bs4.BeautifulSoup(playlist.text, "html.parser")
+        self.logger.debug(" Generating playlist JSON..")
+        playlist = BandcampJSON(playlist_soup, self.debugging, 'playlist').generate()
+        playlist_json = json.loads(playlist)
+        track_count = playlist_json['appData']['tracklist']['tracksSummary']['totalCount']
+        playlist_tracks = [track['url'] for track in playlist_json['appData']['tracklist']['tracks']]
+        if track_count > 50:
+            self.logger.debug(f"Track count is > 50, requesting full track list via API.")
+            playlist_cursor = 49
+            playlist_id = playlist_json['appData']['playlistId']
+            # The page carries the first 50 tracks and the API returns 50 per request, so
+            # that is all the requests that can possibly be left; the bound also stops a
+            # server that keeps handing back a cursor from spinning forever
+            pages_remaining = -(-(track_count - 50) // 50)
+            fetched = 0
+            while playlist_cursor and pages_remaining:
+                playlist_payload = {
+                    'item_id': playlist_id,
+                    'item_type': "playlist",
+                    'next_cursor': playlist_cursor
+                }
+                try:
+                    playlist_json = self.api_request(
+                        "POST", "https://bandcamp.com/api/player/2/player_data_web",
+                        json=playlist_payload)
+                except (requests.exceptions.RequestException, ValueError) as e:
+                    self.logger.error(f"Playlist tracklist request failed, downloading what "
+                                      f"was fetched so far: {e}")
+                    break
+                pages_remaining -= 1
+                tracklist = playlist_json.get('tracklist', {})
+                batch = tracklist.get('tracks', [])
+                fetched += len(batch)
+                if not batch:
+                    break
+                self.logger.debug(f"Tracks fetched: {49 + fetched}")
+                playlist_cursor = tracklist.get('nextCursor')
+                playlist_tracks += [track['url'] for track in batch]
+            self.logger.debug(f"Tracks fetched: {49 + fetched} of {track_count}")
+            self.logger.debug("Full tracklist fetched, proceeding to download.")
+        else:
+            self.logger.debug(f"Track count is <= 50, skipping API requests.")
+        # Check for disabled accounts and purge them from the list as downloading will fail
+        purged_playlist = []
+        for track in playlist_tracks:
+            if '-disabled-' in track:
+                self.logger.debug(f"Removing {track} from download queue as the account has been disabled")
+            else:
+                purged_playlist.append(track)
+        # The page and the paged API can report the same track; downloading it twice would
+        # be pointless
+        return list(dict.fromkeys(purged_playlist))

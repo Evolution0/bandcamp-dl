@@ -1,236 +1,323 @@
-import os
-import sys
 import logging
+import os
+import re
 
-import requests
-from mutagen.mp3 import MP3, EasyMP3
-from mutagen.id3._frames import TIT1
-from mutagen.id3._frames import TIT2
-from mutagen.id3._frames import USLT
-from mutagen.id3._frames import APIC
-from bandcamp_dl.utils.unicode_slugify import slugify
+from mutagen.mp3 import MP3
+from mutagen.id3 import TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC
 
-if not sys.version_info[:2] == (3, 6):
-    import mock
-    from bandcamp_dl.utils import requests_patch
-
-from bandcamp_dl.__init__ import __version__
-
-from bandcamp_dl.utils.clean_print import print_clean
+from bandcamp_dl import __version__
+from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
+from bandcamp_dl.slug import slugify_name
+from bandcamp_dl.progress import make_progress
+from bandcamp_dl.session import make_session
 
 
 class BandcampDownloader:
-    def __init__(self, template, directory, overwrite, embed_lyrics, grouping, embed_art, no_slugify, ok_chars,
-                 space_char, ascii_only, keep_space, keep_upper, debugging, urls=None):
+    def __init__(self, config, urls=None, debugging: bool = False):
         """Initialize variables we will need throughout the Class
 
+        :param config: user config/args
         :param urls: list of urls
-        :param template: filename template
-        :param directory: download location
-        :param overwrite: if True overwrite existing files
+        :param debugging: toggle verbose logging
         """
-        self.headers = {'User-Agent': f'bandcamp-dl/{__version__} (https://github.com/iheanyi/bandcamp-dl)'}
-        self.session = requests.Session()
+        self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
+                        f'(https://github.com/evolution0/bandcamp-dl)'}
 
-        if type(urls) is str:
-            self.urls = [urls]
+        self.session = make_session(config.limit_req_per_minute)
 
+        self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
+        # Debug chatter only: warnings and errors should still show without --debug,
+        # and the old `disabled = debugging` flag muted them exactly when debugging
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
+
+        if isinstance(urls, str):
+            urls = [urls]
+
+        self.config = config
         self.urls = urls
-        self.template = template
-        self.directory = directory
-        self.overwrite = overwrite
-        self.grouping = grouping
-        self.embed_art = embed_art
-        self.embed_lyrics = embed_lyrics
-        self.no_slugify = no_slugify
-        self.ok_chars = ok_chars
-        self.space_char = space_char
-        self.ascii_only = ascii_only
-        self.keep_space = keep_space
-        self.keep_upper = keep_upper
-        self.debugging = debugging
 
-    def start(self, album: dict):
+        self.album_art = None
+
+    def start(self, album: dict) -> bool | None:
         """Start album download process
 
         :param album: album dict
+        :return: False if a track failed, None if the download was cancelled
         """
-        if self.debugging:
-            logging.basicConfig(level=logging.DEBUG)
 
-        if album['full'] is not True:
-            choice = input("Track list incomplete, some tracks may be private, download anyway? (yes/no): ").lower()
+        if not album['full'] and not self.config.no_confirm:
+            choice = input(f"Track list for {album['title']} incomplete, some tracks may be private, download anyway? "
+                           "(yes/no): ").lower()
             if choice == "yes" or choice == "y":
                 print("Starting download process.")
-                self.download_album(album)
+                return self.download_album(album)
             else:
                 print("Cancelling download process.")
                 return None
         else:
-            self.download_album(album)
+            return self.download_album(album)
 
-    def template_to_path(self, track: dict, ascii_only, ok_chars, space_char, keep_space, keep_upper) -> str:
+    def template_to_path(self, track: dict, ascii_only, ok_chars, space_char, keep_space,
+                         case_mode) -> str:
         """Create valid filepath based on template
 
         :param track: track metadata
         :param ok_chars: optional chars to allow
         :param ascii_only: allow only ascii chars in filename
         :param keep_space: retain whitespace in filename
-        :param keep_upper: retain uppercase chars in filename
+        :param case_mode: char case conversion logic (or none / retain)
         :param space_char: char to use in place of spaces
         :return: filepath
         """
-        logging.debug(" Generating filepath/trackname..")
-        path = self.template
+        # TODO: Allow overriding most of this in the case of a Playlist with a arg
+
+        self.logger.debug(" Generating filepath/trackname..")
+        path = self.config.template
+        self.logger.debug(f"\n\tTemplate: {path}")
 
         def slugify_preset(content):
-            slugged = slugify(content, ok=ok_chars, only_ascii=ascii_only, spaces=keep_space, lower=not keep_upper,
-                              space_replacement=space_char)
+            # album_id and track_id reach the tokens as ints from parse(), and the case options
+            # below are string operations, so whatever a token carries becomes text first
+            content = str(content)
+            retain_case = case_mode != CASE_LOWER
+            if case_mode == CASE_UPPER:
+                content = content.upper()
+            if case_mode == CASE_CAMEL:
+                content = re.sub(r'(((?<=\s)|^|-)[a-z])', lambda x: x.group().upper(), content.lower())
+            slugged = slugify_name(content, ok=ok_chars, only_ascii=ascii_only,
+                                   spaces=keep_space, lower=not retain_case,
+                                   space_replacement=space_char)
             return slugged
 
-        if self.no_slugify:
-            path = path.replace("%{artist}", track['artist'])
-            path = path.replace("%{album}", track['album'])
-            path = path.replace("%{title}", track['title'])
-            path = path.replace("%{date}", track['date'])
-            path = path.replace("%{label}", track['label'])
+        template_tokens = ['trackartist', 'artist', 'album', 'title', 'date', 'label', 'track', 'album_id', 'track_id']
+        for token in template_tokens:
+            key = token
+            if token == 'trackartist':
+                key = 'artist'
+            elif token == 'artist':
+                key = 'albumartist'
+
+            if key == 'artist' and track.get('artist') is None:
+                self.logger.debug(' Track artist is None, replacing with album artist')
+                track['artist'] = track.get('albumartist')
+
+            if self.config.untitled_path_from_slug and token == 'album' and track['album'].lower() == 'untitled':
+                track['album'] = track['url'].split("/")[-1].replace("-"," ")
+
+            if token == 'track' and track['track'] == 'None':
+                track['track'] = "Single"
+            else:
+                track['track'] = str(track['track']).zfill(2)
+
+            # A token the release does not carry, e.g. the label of a release with no seller
+            # entry, contributes nothing to the path; it used to insert the word "None" there
+            value = track.get(key, "")
+            if value is None:
+                value = ""
+
+            if self.config.no_slugify:
+                replacement = str(value)
+            else:
+                replacement = slugify_preset(value)
+
+            path = path.replace(f'%{{{token}}}', replacement)
+
+        if self.config.base_dir is not None:
+            path = f"{self.config.base_dir}/{path}.mp3"
         else:
-            path = path.replace("%{artist}", slugify_preset(track['artist']))
-            path = path.replace("%{album}", slugify_preset(track['album']))
-            path = path.replace("%{title}", slugify_preset(track['title']))
-            path = path.replace("%{date}", slugify_preset(track['date']))
-            path = path.replace("%{label}", slugify_preset(track['label']))
+            path = f"{path}.mp3"
 
-        if track['track'] == "None":
-            path = path.replace("%{track}", "Single")
-        else:
-            path = path.replace("%{track}", str(track['track']).zfill(2))
-
-        # Double check that the old issue in Python 2 with unicode strings isn't a problem with f-strings
-        # Otherwise find an alternative to u'STRING'
-        path = f"{self.directory}/{path}.mp3"
-
-        logging.debug(" filepath/trackname generated..")
-        logging.debug(f"\n\tPath: {path}")
+        self.logger.debug(" filepath/trackname generated..")
+        self.logger.debug(f"\n\tPath: {path}")
         return path
 
-    @staticmethod
-    def create_directory(filename: str) -> str:
+
+    def create_directory(self, filename: str) -> str:
         """Create directory based on filename if it doesn't exist
 
         :param filename: full filename
         :return: directory path
         """
         directory = os.path.dirname(filename)
-        logging.debug(f" Directory:\n\t{directory}")
-        logging.debug(" Directory doesn't exist, creating..")
-        if not os.path.exists(directory):
-            os.makedirs(directory)
+        self.logger.debug(f" Directory:\n\t{directory}")
+        self.logger.debug(" Creating directory if it doesn't exist..")
+        # exist_ok rather than an exists() check: on flaky network mounts exists() can
+        # report False for a folder that is there
+        os.makedirs(directory, exist_ok=True)
 
         return directory
 
     def download_album(self, album: dict) -> bool:
+        """Download all MP3 files in the album, showing one progress line per track
+
+        :param album: album dict
+        :return: True if successful
+        """
+        with make_progress(self.config.progress, self.config.debug) as self.progress:
+            self.progress.album(album)
+            return self.download_tracks(album)
+
+    def download_tracks(self, album: dict) -> bool:
         """Download all MP3 files in the album
 
         :param album: album dict
         :return: True if successful
         """
+        album_failed = False
         for track_index, track in enumerate(album['tracks']):
-            track_meta = {
-                "artist": album['artist'],
-                "label": album['label'],
-                "album": album['title'],
-                "title": track['title'],
-                "track": track['track'],
-                # TODO: Find out why the 'lyrics' key seems to vanish.
-                "lyrics": track.get('lyrics', "lyrics unavailable"),
-                "date": album['date']
-            }
+            track_meta = {"artist": track['artist'],
+                          "albumartist": album['artist'],
+                          "label": album['label'],
+                          "album": album['title'],
+                          "title": track['title'].replace(f"{track['artist']} - ", "", 1),
+                          "track": track['track'],
+                          "track_id": track['track_id'],
+                          "album_id": album['album_id'],
+                          # TODO: Find out why the 'lyrics' key seems to vanish.
+                          "lyrics": track.get('lyrics', ""),
+                          "date": album['date'],
+                          "url": album['url'],
+                          "genres": album['genres']}
 
-            self.num_tracks = len(album['tracks'])
-            self.track_num = track_index + 1
+            path_meta = track_meta.copy()
 
-            filepath = self.template_to_path(track_meta, self.ascii_only, self.ok_chars, self.space_char,
-                                             self.keep_space, self.keep_upper) + ".tmp"
+            if 0 < self.config.truncate_album < len(path_meta['album']):
+                path_meta['album'] = path_meta['album'][:self.config.truncate_album]
+
+            if 0 < self.config.truncate_track < len(path_meta['title']):
+                path_meta['title'] = path_meta['title'][:self.config.truncate_track]
+
+
+            filepath = self.template_to_path(path_meta, self.config.ascii_only,
+                                            self.config.ok_chars, self.config.space_char,
+                                            self.config.keep_spaces, self.config.case_mode)
+            filepath = filepath + ".tmp"
             filename = filepath.rsplit('/', 1)[1]
+            self.progress.track(track_index, filename)
             dirname = self.create_directory(filepath)
 
-            logging.debug(f" Current file:\n\t{filepath}")
+            self.logger.debug(" Current file:\n\t%s", filepath)
 
-            if album['art'] and not os.path.exists(dirname + "/cover.jpg"):
+            cover_path = dirname + "/cover.jpg"
+            if album['art'] and not os.path.exists(cover_path):
                 try:
-                    with open(dirname + "/cover.jpg", "wb") as f:
+                    with open(cover_path, "wb") as f:
                         r = self.session.get(album['art'], headers=self.headers)
                         f.write(r.content)
-                    self.album_art = dirname + "/cover.jpg"
+                    self.album_art = cover_path
                 except Exception as e:
                     print(e)
                     print("Couldn't download album art.")
+            elif os.path.exists(cover_path):
+                self.album_art = cover_path
+
+            if self.config.retag and os.path.exists(filepath[:-4]):
+                # Tag the finished file in place instead of downloading it again;
+                # write_id3_tags renames the .tmp back to the final name
+                if os.path.exists(filepath):
+                    # A stale .tmp from an interrupted run would be silently overwritten
+                    # by the rename below, on Windows it would raise instead
+                    os.remove(filepath)
+                os.rename(filepath[:-4], filepath)
+                try:
+                    self.write_id3_tags(filepath, track_meta)
+                except Exception as e:
+                    self.progress.failed(str(e))
+                    print(f"Retagging {filename[:-4]} failed, moving on to the next track..")
+                    # Never leave a finished track parked under its .tmp name
+                    self.rename_tmp_back(filepath)
+                    album_failed = True
+                continue
 
             attempts = 0
             skip = False
+            file_length = 0
 
             while True:
                 try:
-                    if not sys.version_info[:2] == (3, 6):
-                        with mock.patch('http.client.parse_headers', requests_patch.parse_headers):
-                            r = self.session.get(track['url'], headers=self.headers, stream=True)
-                    else:
-                        r = self.session.get(track['url'], headers=self.headers, stream=True)
+                    r = self.session.get(track['url'], headers=self.headers, stream=True)
                     file_length = int(r.headers.get('content-length', 0))
                     total = int(file_length / 100)
-                    # If file exists and is still a tmp file skip downloading and encode
-                    if os.path.exists(filepath):
+                    if not r.ok:
+                        # Never save an error page as audio, mutagen can't read it
+                        print(f"{filename[:-4]} failed with HTTP {r.status_code}, retrying..")
+                    # A leftover tmp file is only safe to encode if its download had finished
+                    elif os.path.exists(filepath) and file_length and \
+                            os.path.getsize(filepath) == file_length:
                         self.write_id3_tags(filepath, track_meta)
                         # Set skip to True so that we don't try encoding again
                         skip = True
                         # break out of the try/except and move on to the next file
                         break
-                    elif os.path.exists(filepath[:-4]) and self.overwrite is not True:
-                        print(f"File: {filename[:-4]} already exists and is complete, skipping..")
+                    elif os.path.exists(filepath[:-4]) and self.config.overwrite is not True:
+                        self.progress.skipped()
                         skip = True
                         break
-                    with open(filepath, "wb") as f:
-                        if file_length is None:
-                            f.write(r.content)
-                        else:
+                    else:
+                        self.progress.downloading(file_length)
+                        with open(filepath, "wb") as f:
                             dl = 0
-                            for data in r.iter_content(chunk_size=total):
+                            for data in r.iter_content(chunk_size=total or 8192):
                                 dl += len(data)
                                 f.write(data)
-                                if not self.debugging:
-                                    done = int(50 * dl / file_length)
-                                    print_clean(
-                                        f'\r({self.track_num}/{self.num_tracks}) [{"=" * done}{" " * (50 - done)}] :: Downloading: {filename[:-8]}')
-                    local_size = os.path.getsize(filepath)
-                    # if the local filesize before encoding doesn't match the remote filesize redownload
-                    if local_size != file_length and attempts != 3:
+                                self.progress.advance(dl)
+                        # if the local filesize matches the remote filesize (or the server sent
+                        # no length and we got data), move on to encoding
+                        local_size = os.path.getsize(filepath)
+                        if local_size == file_length or (not file_length and local_size):
+                            break
                         print(f"{filename} is incomplete, retrying..")
-                        continue
+                    attempts += 1
                     # if the maximum number of retry attempts is reached give up and move on
-                    elif attempts == 3:
-                        print("Maximum retries reached.. skipping.")
+                    if attempts == 3:
+                        self.progress.failed("Maximum retries reached.. skipping.")
                         # Clean up incomplete file
-                        os.remove(filepath)
-                        break
-                    # if all is well continue the download process for the rest of the tracks
-                    else:
+                        if os.path.exists(filepath):
+                            os.remove(filepath)
+                        skip = True
+                        album_failed = True
                         break
                 except Exception as e:
-                    print(e)
-                    print("Downloading failed..")
-                    return False
-            if skip is False:
-                self.write_id3_tags(filepath, track_meta)
+                    self.progress.failed(str(e))
+                    print(f"{filename[:-4]} failed, moving on to the next track..")
+                    # Drop an incomplete file so it is never mistaken for a download, but keep
+                    # one that arrived whole and only failed while tagging
+                    complete = bool(file_length) and os.path.exists(filepath) and \
+                        os.path.getsize(filepath) == file_length
+                    if os.path.exists(filepath) and not complete:
+                        os.remove(filepath)
+                    skip = True
+                    album_failed = True
+                    break
+            if not skip:
+                try:
+                    self.write_id3_tags(filepath, track_meta)
+                except Exception as e:
+                    self.progress.failed(str(e))
+                    print(f"Tagging {filename[:-4]} failed, the audio is still in {filepath}..")
+                    # Keep the downloaded .tmp: the next run re-tags it without downloading again
+                    album_failed = True
 
-        if os.path.isfile(f"{self.directory}/{__version__}.not.finished"):
-            os.remove(f"{self.directory}/{__version__}.not.finished")
+        if os.path.isfile(f"{self.config.base_dir}/{__version__}.not.finished"):
+            os.remove(f"{self.config.base_dir}/{__version__}.not.finished")
 
         # Remove album art image as it is embedded
-        if self.embed_art:
+        # album_art stays None when the album has no cover
+        if self.config.embed_art and self.album_art:
             os.remove(self.album_art)
 
-        return True
+        return not album_failed
+
+    def rename_tmp_back(self, filepath: str):
+        """Put a track that was parked under its .tmp name back under the real one
+
+        :param filepath: the .tmp path
+        """
+        try:
+            if os.path.exists(filepath):
+                os.rename(filepath, filepath[:-4])
+        except OSError as e:
+            self.logger.warning(f"Could not restore {filepath} to {filepath[:-4]}: {e}")
 
     def write_id3_tags(self, filepath: str, meta: dict):
         """Write metadata to the MP3 file
@@ -238,47 +325,55 @@ class BandcampDownloader:
         :param filepath: name of mp3 file
         :param meta: dict of track metadata
         """
-        logging.debug(" Encoding process starting..")
-
-        filename = filepath.rsplit('/', 1)[1][:-8]
-
-        if not self.debugging:
-            print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] :: Encoding: {filename}')
+        self.logger.debug(" Encoding process starting..")
+        self.progress.tagging()
 
         audio = MP3(filepath)
-        audio.delete()
-        audio["TIT2"] = TIT2(encoding=3, text=["title"])
-        audio.save(filename=None, v1=2)
+        if audio.tags is None:
+            audio.add_tags()
 
-        audio = MP3(filepath)
-        if self.grouping and 'label' in meta:
-            audio["TIT1"] = TIT1(encoding=3, text=meta["label"])
+        audio.tags.add(WOAF(encoding=3, url=meta["url"]))
 
-        if self.embed_lyrics:
-            audio["USLT"] = USLT(encoding=3, lang='eng', desc='', text=meta['lyrics'])
+        # 'label' is always in meta but is None for releases with no seller entry, and
+        # mutagen raises on None text, which used to abort the album midway
+        if self.config.group and meta.get('label'):
+            audio.tags.add(TIT1(encoding=3, text=meta["label"]))
 
-        if self.embed_art:
+        if self.config.embed_lyrics:
+            audio.tags.add(USLT(encoding=3, lang='eng', desc='', text=meta['lyrics']))
+
+        if self.config.embed_art and self.album_art:
             with open(self.album_art, 'rb') as cover_img:
                 cover_bytes = cover_img.read()
-                audio["APIC"] = APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes)
+                audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes))
+
+        if self.config.embed_genres:
+            audio.tags.add(TCON(encoding=3, text=meta['genres']))
+
+        if meta['track'].isdigit():
+            audio.tags.add(TRCK(encoding=3, text=meta['track']))
+        else:
+            audio.tags.add(TRCK(encoding=3, text="1"))
+
+        if meta['artist'] is not None:
+            audio.tags.add(TPE1(encoding=3, text=meta['artist']))
+        else:
+            audio.tags.add(TPE1(encoding=3, text=meta['albumartist']))
+
+        audio.tags.add(TIT2(encoding=3, text=meta["title"]))
+        audio.tags.add(TPE2(encoding=3, text=meta['albumartist']))
+        audio.tags.add(TALB(encoding=3, text=meta['album']))
+        # We don't currently separate recording date from release date
+        audio.tags.add(TDRC(encoding=3, text=meta["date"]))
         audio.save()
 
-        audio = EasyMP3(filepath)
-        audio["tracknumber"] = meta['track']
-        audio["title"] = meta["title"]
-        audio["artist"] = meta['artist']
-        audio["album"] = meta['album']
-        audio["date"] = meta["date"]
-        audio.save()
-
-        logging.debug(" Encoding process finished..")
-        logging.debug(f" Renaming:\n\t{filepath} -to-> {filepath[:-4]}")
+        self.logger.debug(" Encoding process finished..")
+        self.logger.debug(" Renaming:\n\t%s -to-> %s", filepath, filepath[:-4])
 
         try:
             os.rename(filepath, filepath[:-4])
-        except WindowsError:
+        except OSError:
             os.remove(filepath[:-4])
             os.rename(filepath, filepath[:-4])
 
-        if not self.debugging:
-            print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] :: Finished: {filename}')
+        self.progress.finished(os.path.getsize(filepath[:-4]))

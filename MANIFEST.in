@@ -1,5 +1,0 @@
-include README.rst AUTHORS.rst CHANGELOG.rst LICENSE
-exclude *.mp3 .gitignore .travis.yml setup.cfg
-
-global-exclude *.pyc
-global-exclude *.DS_STORE

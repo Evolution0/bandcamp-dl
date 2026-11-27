@@ -29,6 +29,7 @@ pip-log.txt
 
 # Unit test / coverage reports
 .coverage
+coverage.xml
 .tox
 nosetests.xml
 
@@ -43,7 +44,9 @@ nosetests.xml
 *.xml
 bandcamp_dl/asyncdownloader.py
 *.log
-
-bandcamp_dl/__init__\.py
+.flake8
+.local.vimrc
 
 venv/
+
+*.patch

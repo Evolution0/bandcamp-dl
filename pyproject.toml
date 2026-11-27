@@ -1,3 +1,57 @@
 [build-system]
-requires = ["setuptools>=43.0.0", "wheel"]
+requires = ["setuptools>=84.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name =  "bandcamp-dl"
+authors = [
+    {name = "Iheanyi Ekechukwu", email = "iekechukwu@gmail.com"},
+    {name = "Anthony Forsberg", email = "forsberganthony@yahoo.com"},
+]
+description = "bandcamp-dl downloads albums and tracks from Bandcamp for you"
+readme = "README.rst"
+classifiers=[
+        'Development Status :: 4 - Beta',
+        'Intended Audience :: End Users/Desktop',
+        'Topic :: Multimedia :: Sound/Audio',
+        'License :: Public Domain',
+        'Programming Language :: Python :: 3.13',
+]
+requires-python = ">=3.13"
+version = "1.0.0"
+dependencies = [
+    "beautifulsoup4 >= 4.15.0",
+    "demjson3 >= 3.0.6",
+    "mutagen >= 1.48.1",
+    "requests >= 2.34.2",
+    "python-slugify >= 9.2.0",
+    "urllib3[socks] >= 2.8.0",
+    "requests-ratelimiter >= 0.10.0",
+    "rich >= 15.0.0",
+]
+
+license = {text = "Unlicense"}
+
+[project.optional-dependencies]
+test = [
+    "pytest >= 9.1.1",
+    "responses >= 0.26.3",
+    "coverage >= 7.17.5",
+]
+
+[project.scripts]
+bandcamp-dl = "bandcamp_dl.__main__:main"
+
+[project.urls]
+Documentation = "https://github.com/evolution0/bandcamp-dl/blob/master/README.rst"
+Source = "https://github.com/evolution0/bandcamp-dl"
+Tracker = "https://github.com/evolution0/bandcamp-dl/issues"
+
+[tool.coverage.run]
+source = ["bandcamp_dl"]
+
+[tool.coverage.report]
+# The suite is kept at full statement coverage: a line nobody can reach carries a
+# `# pragma: no cover` naming the reason, anything else is a missing test
+fail_under = 100
+precision = 0

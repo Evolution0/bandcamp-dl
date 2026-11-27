@@ -4,12 +4,13 @@ import demjson3
 
 
 class BandcampJSON:
-    def __init__(self, body, debugging: bool = False):
+    def __init__(self, body, debugging: bool = False, page_type: str | None = None):
+        self.page_type = page_type
         self.body = body
         self.json_data = []
-
-        if debugging:
-            logging.basicConfig(level=logging.DEBUG)
+        self.logger = logging.getLogger("bandcamp-dl").getChild("JSON")
+        # Debug chatter only; warnings and errors show with or without --debug
+        self.logger.setLevel(logging.DEBUG if debugging else logging.WARNING)
 
     def generate(self):
         """Grabbing needed data from the page"""
@@ -18,30 +19,35 @@ class BandcampJSON:
         return self.json_data
 
     def get_pagedata(self):
-        logging.debug(" Grab pagedata JSON..")
-        pagedata = self.body.find('div', {'id': 'pagedata'})['data-blob']
+        if self.page_type == 'playlist':
+            self.logger.debug(" Grab playlist JSON..")
+            pagedata = self.body.find('div', {'id': 'PlaylistPage'})['data-blob']
+        else:
+            self.logger.debug(" Grab pagedata JSON..")
+            pagedata = self.body.find('div', {'id': 'pagedata'})['data-blob']
         self.json_data.append(pagedata)
 
     def get_js(self):
         """Get <script> element containing the data we need and return the raw JS"""
-        logging.debug(" Grabbing embedded scripts..")
-        embedded_scripts_raw = [self.body.find("script", {"type": "application/ld+json"}).string]
-        for script in self.body.find_all('script'):
-            try:
-                album_info = script['data-tralbum']
-                embedded_scripts_raw.append(album_info)
-            except:
-                continue
-        for script in embedded_scripts_raw:
-            js_data = self.js_to_json(script)
-            self.json_data.append(js_data)
+        if self.page_type == 'playlist':
+            # the dict we need is immediately available and does not need to be extracted from a script
+            self.json_data = self.json_data[0]
+        else:
+            self.logger.debug(" Grabbing embedded scripts..")
+            embedded_scripts_raw = [self.body.find("script", {"type": "application/ld+json"}).string]
+            for script in self.body.find_all('script'):
+                try:
+                    album_info = script['data-tralbum']
+                    embedded_scripts_raw.append(album_info)
+                except Exception:
+                    continue
+            for script in embedded_scripts_raw:
+                js_data = self.js_to_json(script)
+                self.json_data.append(js_data)
 
-    @staticmethod
-    def js_to_json(js_data):
+    def js_to_json(self, js_data):
         """Convert JavaScript dictionary to JSON"""
-        logging.debug(" Converting JS to JSON..")
+        self.logger.debug(" Converting JS to JSON..")
         # Decode with demjson first to reformat keys and lists
         decoded_js = demjson3.decode(js_data)
-        # Encode to make valid JSON, add to list of JSON strings
-        encoded_json = demjson3.encode(decoded_js)
         return demjson3.encode(decoded_js)
