@@ -1,6 +1,6 @@
 bandcamp-dl
 ===========
-|PyPI pyversions| |PyPI download month| |PyPI license| |GitHub release| |GitHub commits|
+|Tests| |Coverage| |PyPI pyversions| |PyPI download month| |PyPI license| |GitHub release| |GitHub commits|
 
 Download audio from `bandcamp.com`_
 
@@ -221,6 +221,16 @@ released into the public domain.
 .. _Requests: https://pypi.python.org/pypi/requests
 .. _youtube-dl: https://github.com/rg3/youtube-dl/blob/master/README.md
 
+.. |Tests| image:: https://github.com/evolution0/bandcamp-dl/actions/workflows/publish-to-test-pypi.yml/badge.svg?branch=master&event=push
+   :target: https://github.com/evolution0/bandcamp-dl/actions/workflows/publish-to-test-pypi.yml
+   :alt: The master test gate, the job every push to master runs before publishing
+
+
+.. |Coverage| image:: https://codecov.io/gh/evolution0/bandcamp-dl/branch/master/graph/badge.svg
+   :target: https://codecov.io/gh/evolution0/bandcamp-dl
+   :alt: Statement coverage of bandcamp_dl on master
+
+
 .. |PyPI pyversions| image:: https://img.shields.io/pypi/pyversions/bandcamp-downloader.svg
    :target: https://pypi.python.org/pypi/bandcamp-downloader/
 
@@ -237,5 +247,5 @@ released into the public domain.
    :target: https://GitHub.com/evolution0/bandcamp-dl/releases/
 
 
-.. |GitHub commits| image:: https://img.shields.io/github/commits-since/evolution0/bandcamp-dl/v0.0.17.svg
+.. |GitHub commits| image:: https://img.shields.io/github/commits-since/evolution0/bandcamp-dl/v1.0.0.svg
    :target: https://GitHub.com/evolution0/bandcamp-dl/commit/
