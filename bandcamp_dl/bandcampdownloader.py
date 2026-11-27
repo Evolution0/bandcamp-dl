@@ -6,6 +6,7 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC
 
 from bandcamp_dl import __version__
+from bandcamp_dl.bandcamp import RATE_LIMIT_HINT
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
 from bandcamp_dl.slug import slugify_name
 from bandcamp_dl.progress import make_progress
@@ -18,6 +19,10 @@ _CAMEL_CASE = re.compile(r'(((?<=\s)|^|-)[a-z])')
 # ~20 kB reads and a large one in ~1 MB reads; a fixed size keeps both sane and means far
 # fewer progress redraws for the big files.
 DOWNLOAD_CHUNK_SIZE = 64 * 1024
+# A cover that is missing, empty or an error page is fetched again, but at most this many
+# times per album: one request used to be all an album ever got, and a dead art url
+# should not pay for one request per track
+COVER_ATTEMPTS = 2
 
 
 class BandcampDownloader:
@@ -52,6 +57,11 @@ class BandcampDownloader:
         self.cover_bytes = None
         # Slugified path components, keyed by the value that produced them
         self.slug_cache = {}
+        # One rate limiting warning per album: the CLI builds a downloader per album,
+        # so this repeats only for albums that actually get told off by the CDN
+        self.rate_limit_warned = False
+        # Cover fetches spent on this album, bounded by COVER_ATTEMPTS
+        self.cover_attempts = 0
 
     def start(self, album: dict) -> bool | None:
         """Start album download process
@@ -168,6 +178,16 @@ class BandcampDownloader:
 
         return directory
 
+    def warn_rate_limit(self, response) -> None:
+        """Say what an HTTP 429 means for this run, once per album
+
+        :param response: the response that came back
+        """
+        if response.status_code != 429 or self.rate_limit_warned:
+            return
+        self.rate_limit_warned = True
+        print(f"Bandcamp is answering with HTTP 429, {RATE_LIMIT_HINT}")
+
     def download_album(self, album: dict) -> bool:
         """Download all MP3 files in the album, showing one progress line per track
 
@@ -220,17 +240,27 @@ class BandcampDownloader:
             self.logger.debug(" Current file:\n\t%s", filepath)
 
             cover_path = dirname + "/cover.jpg"
-            if album['art'] and not os.path.exists(cover_path):
+            if self.cover_is_image(cover_path):
+                self.album_art = cover_path
+            elif album['art'] and self.cover_attempts < COVER_ATTEMPTS:
+                self.cover_attempts += 1
                 try:
-                    with open(cover_path, "wb") as f:
-                        r = self.session.get(album['art'], headers=self.headers)
-                        f.write(r.content)
-                    self.album_art = cover_path
+                    r = self.session.get(album['art'], headers=self.headers)
+                    self.warn_rate_limit(r)
+                    if r.ok and r.content:
+                        # Written only once the body is known to be the image: a usable
+                        # cover.jpg on disk is the check above, so an error page saved here
+                        # would be this album's art forever, and --embed-art would tag every
+                        # track with those bytes. A failure is retried on a later track.
+                        with open(cover_path, "wb") as f:
+                            f.write(r.content)
+                        self.album_art = cover_path
+                    else:
+                        print(f"Couldn't download album art (HTTP {r.status_code}, "
+                              f"{len(r.content)} bytes)")
                 except Exception as e:
                     print(e)
                     print("Couldn't download album art.")
-            elif os.path.exists(cover_path):
-                self.album_art = cover_path
 
             if self.config.retag and os.path.exists(filepath[:-4]):
                 # Tag the finished file in place instead of downloading it again;
@@ -261,6 +291,7 @@ class BandcampDownloader:
                     if not r.ok:
                         # Never save an error page as audio, mutagen can't read it
                         print(f"{filename[:-4]} failed with HTTP {r.status_code}, retrying..")
+                        self.warn_rate_limit(r)
                     # A leftover tmp file is only safe to encode if its download had finished
                     elif os.path.exists(filepath) and file_length and \
                             os.path.getsize(filepath) == file_length:
@@ -338,6 +369,22 @@ class BandcampDownloader:
                 os.rename(filepath, filepath[:-4])
         except OSError as e:
             self.logger.warning(f"Could not restore {filepath} to {filepath[:-4]}: {e}")
+
+    @staticmethod
+    def cover_is_image(path: str) -> bool:
+        """Whether a cover file already on disk is usable as album art
+
+        :param path: the cover path
+        :return: True when a file carrying an image signature sits there; an error page an
+                 older run saved as cover.jpg reads as False, so it gets fetched again
+        """
+        try:
+            with open(path, "rb") as cover_file:
+                head = cover_file.read(8)
+        except OSError:
+            return False
+        # Bandcamp serves both jpeg and png covers under the same cover.jpg name
+        return head[:3] == b"\xff\xd8\xff" or head == b"\x89PNG\r\n\x1a\n"
 
     def read_cover_bytes(self) -> bytes:
         """Read the album art off disk once and hand the same bytes to every track

@@ -187,6 +187,31 @@ def test_an_artist_page_url_is_expanded_before_downloading(downloaded, monkeypat
     assert downloaded == ["https://loopy.bandcamp.com/album/one"]
 
 
+def test_an_artist_page_on_its_own_domain_is_expanded(downloaded, monkeypatch):
+    # The band behind music.loopy.example is loopy.bandcamp.com, and the domain url used
+    # to be dropped without a word
+    monkeypatch.setattr(Bandcamp, "resolve_band_name", lambda self, url: "loopy")
+    monkeypatch.setattr(Bandcamp, "get_full_discography",
+                        lambda self, name, page_type: [f"https://{name}.bandcamp.com/album/one"])
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "https://music.loopy.example/music")
+
+    assert downloaded == ["https://loopy.bandcamp.com/album/one"]
+
+
+def test_an_artist_page_whose_band_cannot_be_found_fails_the_run(downloaded, monkeypatch, capsys):
+    monkeypatch.setattr(Bandcamp, "resolve_band_name", lambda self, url: None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        run(monkeypatch, "https://music.loopy.example")
+
+    assert exit_info.value.code == 1
+    assert ("Could not work out which artist or label https://music.loopy.example belongs to"
+            in capsys.readouterr().out)
+    assert downloaded == []
+
+
 def test_a_url_that_is_not_an_album_or_a_track_is_left_alone(downloaded, monkeypatch):
     merch_only = ["https://a.bandcamp.com/merch/shirt"]
     monkeypatch.setattr(Bandcamp, "get_playlist", lambda self, url: merch_only)

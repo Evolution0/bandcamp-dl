@@ -18,6 +18,12 @@ MOBILE_API = "https://bandcamp.com/api/mobile/24"
 SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 API_RETRIES = 5
 PAGE_RETRIES = 5
+# How many hops of a redirect chain to walk by hand when naming the band behind a url
+REDIRECT_HOPS = 10
+# What an HTTP 429 answer means for the user, and what to do about it. Kept to one line
+# per run: a rate limited run would otherwise bury itself in it.
+RATE_LIMIT_HINT = ("bandcamp-dl is making too many requests too quickly: run with "
+                   "--limit-req-per-minute <requests> to stay under Bandcamp's rate limit")
 
 
 @lru_cache(maxsize=1)
@@ -58,6 +64,8 @@ class Bandcamp:
         self.tracks = None
         # tralbum_details responses keyed by bandcamp_url, filled by the mobile API fallback
         self.api_tralbums = {}
+        # One rate limiting warning per run, see RATE_LIMIT_HINT
+        self.rate_limit_warned = False
         self.logger = logging.getLogger("bandcamp-dl").getChild("Main")
         self.debugging = debugging
         # Debug chatter only; warnings and errors must survive without --debug.
@@ -239,6 +247,7 @@ class Bandcamp:
             response = self.session.get(url, headers=self.headers)
             if response.status_code != 429:
                 break
+            self.warn_rate_limit()
             if attempt == PAGE_RETRIES - 1:
                 # Out of retries: report the rate limiting instead of stalling first
                 print(f"Still rate limited by Bandcamp after {PAGE_RETRIES} attempts..")
@@ -249,6 +258,18 @@ class Bandcamp:
             print(f"Rate limited by Bandcamp, retrying in {delay}s..")
             time.sleep(delay)
         return response
+
+    def warn_rate_limit(self) -> None:
+        """Say what an HTTP 429 means and how to fix it, once per run
+
+        :return: None
+        """
+        if self.rate_limit_warned:
+            return
+        self.rate_limit_warned = True
+        # A warning, not debug chatter: without --debug the user still has to be told
+        # that their own request rate is what Bandcamp is objecting to
+        self.logger.warning(f"Bandcamp is answering with HTTP 429, {RATE_LIMIT_HINT}")
 
     def get_track_lyrics(self, track_url):
         self.logger.debug(" Fetching track lyrics..")
@@ -411,11 +432,69 @@ class Bandcamp:
     # Mobile API fallback: some artists' pages redirect forever between
     # name.bandcamp.com and a broken custom domain, but the JSON API still answers.
 
+    @staticmethod
+    def bandcamp_subdomain(host: str) -> str | None:
+        """Return the band subdomain when a host is a band's bandcamp.com page
+
+        :param host: hostname as str, e.g. "loopy.bandcamp.com"
+        :return: subdomain as str, None for any other host
+        """
+        if not host.endswith(".bandcamp.com"):
+            return None
+        subdomain = host[:-len(".bandcamp.com")]
+        # Deeper hosts that merely end in the suffix, and bandcamp's own www host, are
+        # not band pages; only the single-label form names a band.
+        if not subdomain or "." in subdomain or subdomain == "www":
+            return None
+        return subdomain
+
+    def resolve_band_name(self, url: str) -> str | None:
+        """Find the bandcamp.com subdomain the band behind a url lives on
+
+        The url may sit on the band's own domain, whose first label is not the band's
+        subdomain: music.businesscasual.biz belongs to businesscasual87, so taking the
+        first label looks the band up as "music". requests gives up on that ping-pong
+        with TooManyRedirects and throws the chain away, but the chain is what names
+        the band, so walk it a hop at a time and read the host.
+
+        :param url: album/track url
+        :return: band subdomain as str, None if the chain never reaches bandcamp.com
+        """
+        subdomain = self.bandcamp_subdomain(urlparse(url).netloc)
+        if subdomain:
+            return subdomain
+
+        seen = {url}
+        current = url
+        for _ in range(REDIRECT_HOPS):
+            try:
+                response = self.session.request("GET", current, headers=self.headers,
+                                                allow_redirects=False)
+            except requests.exceptions.RequestException as e:
+                self.logger.debug(f"Could not follow {current} to its redirect target: {e}")
+                return None
+            location = response.headers.get('Location')
+            if not location:
+                self.logger.debug(f"{current} does not redirect, so no bandcamp.com host "
+                                  f"is reachable from it")
+                return None
+            current = urljoin(current, location)
+            if current in seen:
+                # Back on a url already walked: a closed chain with no bandcamp.com host
+                return None
+            seen.add(current)
+            subdomain = self.bandcamp_subdomain(urlparse(current).netloc)
+            if subdomain:
+                return subdomain
+        self.logger.debug(f"No bandcamp.com host within {REDIRECT_HOPS} redirects from {url}")
+        return None
+
     def api_request(self, method: str, url: str, **kwargs) -> dict:
         for attempt in range(API_RETRIES):
             response = self.session.request(method, url, headers=self.headers, **kwargs)
             if response.status_code != 429:
                 break
+            self.warn_rate_limit()
             if attempt == API_RETRIES - 1:
                 # Out of retries: raise_for_status below reports the rate limiting
                 self.logger.debug(f"Still rate limited by the mobile API after {API_RETRIES} attempts")
@@ -437,9 +516,13 @@ class Bandcamp:
         hosts = {f"{name}.bandcamp.com"}
         # Search results list custom-domain artists under that domain, so also trust
         # exactly the host that name.bandcamp.com redirects to
-        location = self.session.request("GET", f"https://{name}.bandcamp.com/",
-                                        headers=self.headers,
-                                        allow_redirects=False).headers.get('Location')
+        redirect = self.session.request("GET", f"https://{name}.bandcamp.com/",
+                                        headers=self.headers, allow_redirects=False)
+        if redirect.status_code == 429:
+            # A rate limited lookup looks like a band that does not exist below, so
+            # say which of the two it was before that error reaches the user
+            self.warn_rate_limit()
+        location = redirect.headers.get('Location')
         if location:
             redirect_host = urlparse(location).netloc
             if redirect_host:
@@ -496,8 +579,15 @@ class Bandcamp:
         """Parse an album/track whose web page redirect-loops, through the mobile API"""
         self.logger.warning(f"{url} is stuck in a redirect loop, falling back to Bandcamp's mobile API")
         parsed_url = urlparse(url)
+        # The url may be on the band's own domain; the redirect chain, not the first
+        # label of the host, is what names the band.
+        name = self.resolve_band_name(url)
+        if name is None:
+            name = parsed_url.netloc.split('.')[0]
+            self.logger.warning(f"Could not follow {url} to a bandcamp.com page, looking up "
+                                f"the band as: {name}")
         # Only look at this band's releases; the cache may hold other bands' too
-        for api_url in self.get_api_discography(parsed_url.netloc.split('.')[0], parsed_url.path):
+        for api_url in self.get_api_discography(name, parsed_url.path):
             if urlparse(api_url).path == parsed_url.path:
                 return self.parse_api_tralbum(self.api_tralbums[api_url], url, art, lyrics,
                                               genres, cover_quality)

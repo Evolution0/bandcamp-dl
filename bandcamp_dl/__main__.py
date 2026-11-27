@@ -111,6 +111,9 @@ def main():
     bandcamp = Bandcamp(limit_req_per_minute=arguments.limit_req_per_minute,
                        debugging=arguments.debug)
 
+    # Set when a URL looked like an artist page but no band could be found behind it
+    unresolved_url = False
+
     # TODO:
     #   Identify page type, determine download method, proceed.
     #   Multi-album/track pages: Artist, Label, Playlist
@@ -134,8 +137,16 @@ def main():
         urls = []
         for url in arguments.URL:
             parsed_url = urlparse(url)
-            if parsed_url.netloc.endswith('.bandcamp.com') and (parsed_url.path == '/music' or parsed_url.path == '/' or parsed_url.path == ''):
-                name = parsed_url.netloc.split('.')[0]
+            if parsed_url.path in ('/music', '/', ''):
+                # An artist or label root page. The band may publish under its own
+                # domain (music.businesscasual.biz), whose first label is not the band's
+                # name, so follow the redirects to the bandcamp.com subdomain; a url
+                # already on one is answered from its own host, at no request cost.
+                name = bandcamp.resolve_band_name(url)
+                if name is None:
+                    print(f"Could not work out which artist or label {url} belongs to")
+                    unresolved_url = True
+                    continue
                 logger.debug(f"Specified an artist or label, downloading discography for: {name}")
                 urls.extend(bandcamp.get_full_discography(name, "music"))
             elif '/playlist/' in parsed_url.path:
@@ -188,7 +199,7 @@ def main():
                 download_failed = True
             # Add a newline to stop prompt mangling
             print("")
-        if parse_failed or download_failed:
+        if parse_failed or download_failed or unresolved_url:
             sys.stderr.write("Some albums could not be downloaded, see the messages above.\n")
             sys.exit(1)
     else:

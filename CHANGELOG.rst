@@ -56,6 +56,28 @@ Unreleased
   ``name.bandcamp.com`` and a broken custom domain (``TooManyRedirects``)
   now download through Bandcamp's mobile API instead. Lyrics are not
   available on this path.
+- [Bugfix] That fallback finds the band behind a url on the band's own domain
+  (``music.businesscasual.biz`` for instance) by following the redirects to its
+  ``bandcamp.com`` subdomain, instead of taking the first label of the host as the
+  band name, which looked such a band up as ``music`` and reported the release as
+  missing. Playlist tracklists carry those custom domain urls, so playlists were
+  the usual way to hit it.
+- [Bugfix] An artist page on the band's own domain (``bandcamp-dl
+  https://music.businesscasual.biz``) is now recognised as an artist page; it used
+  to be dropped without a word because the host is not ``*.bandcamp.com``. A root
+  page whose band cannot be found is reported and fails the run with exit code 1.
+- [Enhancement] An HTTP 429 from Bandcamp is now explained instead of being swallowed
+  by the retry loops: the run is making too many requests too quickly and should use
+  ``--limit-req-per-minute``. The advice is given once per run, and once per album
+  while downloading, not per retried request or skipped release. A rate limited band
+  lookup warns too, because it otherwise only reads as "no such band".
+- [Bugfix] Album art is no longer saved from a failed response. The file was opened
+  before the request, so a 429 or error page body became ``cover.jpg``; the resume test
+  was only whether that file exists, so the garbage stayed the album's art forever and
+  ``--embed-art`` tagged every track with it. A cover is now written only from a
+  successful non-empty body, an existing file must carry an image signature to be reused
+  (so a poisoned folder heals itself), and a dead art url costs at most two requests
+  per album instead of one per track.
 - [Bugfix] Page requests now wait and retry when Bandcamp rate limits them
   (HTTP 429). A page that still fails is reported with its HTTP status
   instead of "does not exist", and a failed artist/label page exits with
