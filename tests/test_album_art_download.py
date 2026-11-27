@@ -4,7 +4,7 @@ import requests
 import responses
 from mutagen.id3 import ID3
 
-from bandcamp_dl.bandcampdownloader import BandcampDownloader
+from bandcamp_dl.bandcampdownloader import BandcampDownloader, COVER_ATTEMPTS
 
 TRACK_URL = "https://t4.bcbits.com/stream/abc/mp3-128/1"
 ART_URL = "https://f4.bcbits.com/img/a1234567890_16.jpg"
@@ -89,3 +89,45 @@ def test_a_dead_cdn_only_costs_the_cover(tmp_path, capsys):
     assert "cdn down" in output
     tags = ID3(tmp_path / "loopy" / "first" / "01 - one.mp3")
     assert not tags.getall("APIC")
+
+
+@responses.activate
+def test_a_rate_limited_cover_is_never_saved_as_the_album_art(tmp_path, capsys):
+    add_track()
+    responses.add(responses.GET, ART_URL, status=429, body=b"<html>rate limited</html>")
+
+    assert make_downloader(tmp_path, embed_art=True).download_album(make_album(ART_URL)) is True
+
+    cover = tmp_path / "loopy" / "first" / "cover.jpg"
+    assert not cover.exists()
+    output = capsys.readouterr().out
+    assert "Couldn't download album art (HTTP 429" in output
+    assert output.count("--limit-req-per-minute") == 1
+
+
+@responses.activate
+def test_a_saved_error_page_cover_is_fetched_again(tmp_path):
+    # A cover older runs wrote straight off the response: an error page is not art, so
+    # it must not be trusted just because cover.jpg exists
+    add_track()
+    cover = tmp_path / "loopy" / "first" / "cover.jpg"
+    cover.parent.mkdir(parents=True)
+    cover.write_bytes(b"<html>rate limited</html>")
+    responses.add(responses.GET, ART_URL, body=COVER_BYTES)
+
+    assert make_downloader(tmp_path, embed_art=False).download_album(make_album(ART_URL)) is True
+
+    assert cover.read_bytes() == COVER_BYTES
+
+
+@responses.activate
+def test_a_dead_art_url_costs_the_album_not_every_track(tmp_path):
+    add_track()
+    responses.add(responses.GET, ART_URL, status=404)
+    album = make_album(ART_URL)
+    album["tracks"] = album["tracks"] * 5
+
+    assert make_downloader(tmp_path, embed_art=False).download_album(album) is True
+
+    art_calls = [call for call in responses.calls if call.request.url == ART_URL]
+    assert len(art_calls) == COVER_ATTEMPTS

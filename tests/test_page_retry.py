@@ -57,3 +57,19 @@ def test_get_page_does_not_sleep_after_the_last_attempt(monkeypatch):
         Bandcamp().get_full_discography("busy", "music")
 
     assert len(slept) == PAGE_RETRIES - 1
+
+
+@responses.activate
+def test_a_rate_limited_run_says_to_limit_the_requests_once(caplog):
+    add_rate_limited(ALBUM_URL)
+    responses.add(responses.GET, ALBUM_URL, body="<html>ok</html>")
+    add_rate_limited(MUSIC_URL)
+    responses.add(responses.GET, MUSIC_URL, body="<html>ok</html>")
+
+    bandcamp = Bandcamp()
+    bandcamp.get_page(ALBUM_URL)
+    bandcamp.get_page(MUSIC_URL)
+
+    assert "--limit-req-per-minute" in caplog.text
+    # Four rate limited requests, one piece of advice
+    assert caplog.text.count("--limit-req-per-minute") == 1

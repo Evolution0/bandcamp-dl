@@ -26,12 +26,17 @@ TRALBUM = {
 }
 
 
+def add_loop(bandcamp_host, custom_host):
+    """A band's bandcamp.com subdomain and its custom domain redirect to each other forever"""
+    responses.add(responses.GET, re.compile(rf"https://{bandcamp_host}\.bandcamp\.com/.*"),
+                  status=301, headers={"Location": f"https://{custom_host}/music"})
+    responses.add(responses.GET, re.compile(rf"https://{re.escape(custom_host)}/.*"),
+                  status=303, headers={"Location": f"https://{bandcamp_host}.bandcamp.com/music"})
+
+
 def add_redirect_loop(host):
     """name.bandcamp.com and its custom domain redirect to each other forever"""
-    responses.add(responses.GET, re.compile(rf"https://{host}\.bandcamp\.com/.*"), status=301,
-                  headers={"Location": "https://loopy.example/music"})
-    responses.add(responses.GET, re.compile(r"https://loopy\.example/.*"), status=303,
-                  headers={"Location": f"https://{host}.bandcamp.com/music"})
+    add_loop(host, "loopy.example")
 
 
 def add_api():
@@ -92,6 +97,28 @@ def test_api_request_retries_after_rate_limit():
 
     assert result["id"] == 7
     assert len(responses.calls) == 2
+
+
+@responses.activate
+def test_a_rate_limited_api_advises_limiting_the_requests_once(caplog):
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details", status=429,
+                  headers={"Retry-After": "0"})
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details", status=429,
+                  headers={"Retry-After": "0"})
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details", json=TRALBUM)
+
+    assert Bandcamp().api_request("GET", f"{MOBILE_API}/tralbum_details")["id"] == 7
+    # The retries are debug chatter, so without --debug this is the only 429 the user sees
+    assert caplog.text.count("--limit-req-per-minute") == 1
+
+
+@responses.activate
+def test_a_rate_limited_band_lookup_warns_instead_of_only_denying_the_band(caplog):
+    responses.add(responses.GET, re.compile(r"https://loopy\.bandcamp\.com/.*"), status=429)
+    responses.add(responses.POST, SEARCH_API, json={"auto": {"results": []}})
+
+    assert Bandcamp().find_band_id("loopy") is None
+    assert "--limit-req-per-minute" in caplog.text
 
 
 @responses.activate
@@ -174,3 +201,55 @@ def test_the_api_fallback_says_lyrics_are_unavailable(caplog):
 
     assert "lyrics" not in album["tracks"][0]
     assert "Track lyrics are not available" in caplog.text
+
+
+# A playlist hands out the band's own domain, not its bandcamp.com subdomain: the first
+# label of music.custom.example is "music", while the band lives on businesscasual87.
+
+CUSTOM_TRACK_URL = "https://music.custom.example/track/twenty-mako"
+CUSTOM_SEARCH = {"auto": {"results": [
+    {"type": "a", "id": 9, "item_url_root": "https://elsewhere.example"},
+    {"type": "b", "id": 42, "item_url_root": "https://music.custom.example"},
+]}}
+
+
+@responses.activate
+def test_a_track_url_on_a_custom_domain_resolves_to_its_band():
+    add_loop("businesscasual87", "music.custom.example")
+    responses.add(responses.POST, SEARCH_API, json=CUSTOM_SEARCH)
+    responses.add(responses.POST, f"{MOBILE_API}/band_details",
+                  json={"discography": [{"item_id": 7, "item_type": "track", "band_id": 42}]})
+    responses.add(responses.GET, f"{MOBILE_API}/tralbum_details",
+                  json={**TRALBUM, "bandcamp_url": CUSTOM_TRACK_URL})
+
+    album = Bandcamp().parse(CUSTOM_TRACK_URL, art=False)
+
+    assert album["title"] == "First"
+    assert album["url"] == CUSTOM_TRACK_URL
+    # Nothing may be looked up as the band "music"
+    assert all("music.bandcamp.com" not in call.request.url for call in responses.calls)
+
+
+@responses.activate
+def test_resolve_band_name_reads_the_chain_not_the_first_label():
+    add_loop("businesscasual87", "music.custom.example")
+
+    assert Bandcamp().resolve_band_name(CUSTOM_TRACK_URL) == "businesscasual87"
+    # A bandcamp.com url is already named, so the chain costs no requests
+    assert Bandcamp().resolve_band_name("https://loopy.bandcamp.com/album/first") == "loopy"
+    assert len(responses.calls) == 1
+
+
+@responses.activate
+def test_resolve_band_name_gives_up_on_a_chain_without_bandcamp(caplog):
+    responses.add(responses.GET, re.compile(r"https://music\.custom\.example/.*"), status=301,
+                  headers={"Location": "https://elsewhere.example/x"})
+    responses.add(responses.GET, re.compile(r"https://elsewhere\.example/.*"), status=301,
+                  headers={"Location": "https://music.custom.example/x"})
+
+    with pytest.raises(SystemExit) as exit_info:
+        Bandcamp().parse(CUSTOM_TRACK_URL)
+
+    assert exit_info.value.code == 2
+    assert ("Could not follow https://music.custom.example/track/twenty-mako to a bandcamp.com "
+            "page, looking up the band as: music") in caplog.text

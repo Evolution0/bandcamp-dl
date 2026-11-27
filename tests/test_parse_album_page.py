@@ -184,6 +184,18 @@ def test_lyrics_are_read_from_each_track_page():
 
 
 @responses.activate
+def test_a_track_that_advertises_no_lyrics_costs_no_extra_page():
+    # TRALBUM's tracks all carry has_lyrics: False; asking for lyrics used to fetch a
+    # page per track that get_track_metadata then threw away
+    responses.add(responses.GET, ALBUM_URL, body=album_html())
+
+    album = Bandcamp().parse(ALBUM_URL, lyrics=True)
+
+    assert len(responses.calls) == 1
+    assert "lyrics" not in album["tracks"][0]
+
+
+@responses.activate
 def test_a_release_date_only_the_embed_knows_is_still_used():
     tralbum = copy.deepcopy(TRALBUM)
     tralbum["album_release_date"] = None

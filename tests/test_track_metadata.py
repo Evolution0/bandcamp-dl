@@ -41,6 +41,15 @@ def test_lyrics_only_land_on_a_track_that_declares_them():
         track(has_lyrics=True, lyrics="kept"))["lyrics"] == "kept"
 
 
+def test_a_track_that_advertises_lyrics_never_fetched_has_no_key():
+    # Without --embed-lyrics parse() no longer writes the key at all, and a release
+    # that advertises lyrics used to be read as a missing key
+    declared = track(has_lyrics=True)
+    del declared["lyrics"]
+
+    assert "lyrics" not in Bandcamp().get_track_metadata(declared)
+
+
 def test_a_private_track_makes_the_album_incomplete():
     bandcamp = Bandcamp()
 

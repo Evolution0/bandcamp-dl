@@ -41,6 +41,17 @@ def test_error_response_is_not_saved_as_audio(tmp_path):
 
 
 @responses.activate
+def test_a_rate_limited_download_says_to_limit_the_requests_once(tmp_path, capsys):
+    responses.add(responses.GET, TRACK_URL, status=429, body=b"rate limited")
+
+    make_downloader(tmp_path).download_album(ALBUM)
+
+    out = capsys.readouterr().out
+    assert "failed with HTTP 429, retrying" in out
+    assert out.count("--limit-req-per-minute") == 1
+
+
+@responses.activate
 def test_leftover_empty_tmp_file_is_redownloaded(tmp_path):
     responses.add(responses.GET, TRACK_URL, body=MP3_BYTES,
                   headers={"Content-Length": str(len(MP3_BYTES))})

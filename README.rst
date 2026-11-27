@@ -200,6 +200,10 @@ Dependencies
 - `Mutagen`_ - ID3 Encoding
 - `Requests`_ - for retrieving the HTML
 
+`lxml`_ is picked up by BeautifulSoup if it is installed and parses the pages
+considerably faster than the built-in parser; it stays an optional extra, the
+parser choice is made once per run either way.
+
 Copyright
 ---------
 
@@ -216,6 +220,7 @@ released into the public domain.
 .. _Issues: https://github.com/evolution0/bandcamp-dl/search?type=Issues
 .. _the list of supported options: https://github.com/evolution0/bandcamp-dl/blob/master/README.rst#synopsis
 .. _BeautifulSoup4: https://pypi.python.org/pypi/beautifulsoup4 
+.. _lxml: https://pypi.python.org/pypi/lxml
 .. _Demjson: https://pypi.python.org/pypi/demjson
 .. _Mutagen: https://pypi.python.org/pypi/mutagen
 .. _Requests: https://pypi.python.org/pypi/requests

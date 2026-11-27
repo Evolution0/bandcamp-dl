@@ -6,24 +6,40 @@ from mutagen.mp3 import MP3
 from mutagen.id3 import TIT1, TIT2, WOAF, USLT, APIC, TCON, TRCK, TPE1, TPE2, TALB, TDRC
 
 from bandcamp_dl import __version__
+from bandcamp_dl.bandcamp import RATE_LIMIT_HINT
 from bandcamp_dl.config import CASE_LOWER, CASE_UPPER, CASE_CAMEL, CASE_NONE
 from bandcamp_dl.slug import slugify_name
 from bandcamp_dl.progress import make_progress
 from bandcamp_dl.session import make_session
 
+# A release name is slugified once per track otherwise; the album, artist, date, label and
+# album_id tokens carry the same value for every track of an album
+_CAMEL_CASE = re.compile(r'(((?<=\s)|^|-)[a-z])')
+# The old chunk size was one hundredth of the whole file, so a 3-minute mp3 arrived in
+# ~20 kB reads and a large one in ~1 MB reads; a fixed size keeps both sane and means far
+# fewer progress redraws for the big files.
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
+# A cover that is missing, empty or an error page is fetched again, but at most this many
+# times per album: one request used to be all an album ever got, and a dead art url
+# should not pay for one request per track
+COVER_ATTEMPTS = 2
+
 
 class BandcampDownloader:
-    def __init__(self, config, urls=None, debugging: bool = False):
+    def __init__(self, config, urls=None, debugging: bool = False, session=None):
         """Initialize variables we will need throughout the Class
 
         :param config: user config/args
         :param urls: list of urls
         :param debugging: toggle verbose logging
+        :param session: a requests session to download through; the CLI hands it the
+                       parser's own session so one connection pool and one rate limit
+                       cover the whole run instead of being rebuilt per album
         """
         self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
                         f'(https://github.com/evolution0/bandcamp-dl)'}
 
-        self.session = make_session(config.limit_req_per_minute)
+        self.session = session or make_session(config.limit_req_per_minute)
 
         self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
         # Debug chatter only: warnings and errors should still show without --debug,
@@ -37,6 +53,15 @@ class BandcampDownloader:
         self.urls = urls
 
         self.album_art = None
+        # The cover is read once per album and reused for every track that embeds it
+        self.cover_bytes = None
+        # Slugified path components, keyed by the value that produced them
+        self.slug_cache = {}
+        # One rate limiting warning per album: the CLI builds a downloader per album,
+        # so this repeats only for albums that actually get told off by the CDN
+        self.rate_limit_warned = False
+        # Cover fetches spent on this album, bounded by COVER_ATTEMPTS
+        self.cover_attempts = 0
 
     def start(self, album: dict) -> bool | None:
         """Start album download process
@@ -76,17 +101,23 @@ class BandcampDownloader:
         self.logger.debug(f"\n\tTemplate: {path}")
 
         def slugify_preset(content):
-            # album_id and track_id reach the tokens as ints from parse(), and the case options
-            # below are string operations, so whatever a token carries becomes text first
+            # album_id and track_id reach the tokens as ints from parse(), and the case
+            # options below are string operations, so whatever a token carries becomes
+            # text first
             content = str(content)
+            cache_key = (content, case_mode, ok_chars, ascii_only, keep_space, space_char)
+            slugged = self.slug_cache.get(cache_key)
+            if slugged is not None:
+                return slugged
             retain_case = case_mode != CASE_LOWER
             if case_mode == CASE_UPPER:
                 content = content.upper()
             if case_mode == CASE_CAMEL:
-                content = re.sub(r'(((?<=\s)|^|-)[a-z])', lambda x: x.group().upper(), content.lower())
+                content = _CAMEL_CASE.sub(lambda x: x.group().upper(), content.lower())
             slugged = slugify_name(content, ok=ok_chars, only_ascii=ascii_only,
                                    spaces=keep_space, lower=not retain_case,
                                    space_replacement=space_char)
+            self.slug_cache[cache_key] = slugged
             return slugged
 
         template_tokens = ['trackartist', 'artist', 'album', 'title', 'date', 'label', 'track', 'album_id', 'track_id']
@@ -147,6 +178,16 @@ class BandcampDownloader:
 
         return directory
 
+    def warn_rate_limit(self, response) -> None:
+        """Say what an HTTP 429 means for this run, once per album
+
+        :param response: the response that came back
+        """
+        if response.status_code != 429 or self.rate_limit_warned:
+            return
+        self.rate_limit_warned = True
+        print(f"Bandcamp is answering with HTTP 429, {RATE_LIMIT_HINT}")
+
     def download_album(self, album: dict) -> bool:
         """Download all MP3 files in the album, showing one progress line per track
 
@@ -199,17 +240,27 @@ class BandcampDownloader:
             self.logger.debug(" Current file:\n\t%s", filepath)
 
             cover_path = dirname + "/cover.jpg"
-            if album['art'] and not os.path.exists(cover_path):
+            if self.cover_is_image(cover_path):
+                self.album_art = cover_path
+            elif album['art'] and self.cover_attempts < COVER_ATTEMPTS:
+                self.cover_attempts += 1
                 try:
-                    with open(cover_path, "wb") as f:
-                        r = self.session.get(album['art'], headers=self.headers)
-                        f.write(r.content)
-                    self.album_art = cover_path
+                    r = self.session.get(album['art'], headers=self.headers)
+                    self.warn_rate_limit(r)
+                    if r.ok and r.content:
+                        # Written only once the body is known to be the image: a usable
+                        # cover.jpg on disk is the check above, so an error page saved here
+                        # would be this album's art forever, and --embed-art would tag every
+                        # track with those bytes. A failure is retried on a later track.
+                        with open(cover_path, "wb") as f:
+                            f.write(r.content)
+                        self.album_art = cover_path
+                    else:
+                        print(f"Couldn't download album art (HTTP {r.status_code}, "
+                              f"{len(r.content)} bytes)")
                 except Exception as e:
                     print(e)
                     print("Couldn't download album art.")
-            elif os.path.exists(cover_path):
-                self.album_art = cover_path
 
             if self.config.retag and os.path.exists(filepath[:-4]):
                 # Tag the finished file in place instead of downloading it again;
@@ -237,10 +288,10 @@ class BandcampDownloader:
                 try:
                     r = self.session.get(track['url'], headers=self.headers, stream=True)
                     file_length = int(r.headers.get('content-length', 0))
-                    total = int(file_length / 100)
                     if not r.ok:
                         # Never save an error page as audio, mutagen can't read it
                         print(f"{filename[:-4]} failed with HTTP {r.status_code}, retrying..")
+                        self.warn_rate_limit(r)
                     # A leftover tmp file is only safe to encode if its download had finished
                     elif os.path.exists(filepath) and file_length and \
                             os.path.getsize(filepath) == file_length:
@@ -257,7 +308,7 @@ class BandcampDownloader:
                         self.progress.downloading(file_length)
                         with open(filepath, "wb") as f:
                             dl = 0
-                            for data in r.iter_content(chunk_size=total or 8192):
+                            for data in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                                 dl += len(data)
                                 f.write(data)
                                 self.progress.advance(dl)
@@ -319,6 +370,32 @@ class BandcampDownloader:
         except OSError as e:
             self.logger.warning(f"Could not restore {filepath} to {filepath[:-4]}: {e}")
 
+    @staticmethod
+    def cover_is_image(path: str) -> bool:
+        """Whether a cover file already on disk is usable as album art
+
+        :param path: the cover path
+        :return: True when a file carrying an image signature sits there; an error page an
+                 older run saved as cover.jpg reads as False, so it gets fetched again
+        """
+        try:
+            with open(path, "rb") as cover_file:
+                head = cover_file.read(8)
+        except OSError:
+            return False
+        # Bandcamp serves both jpeg and png covers under the same cover.jpg name
+        return head[:3] == b"\xff\xd8\xff" or head == b"\x89PNG\r\n\x1a\n"
+
+    def read_cover_bytes(self) -> bytes:
+        """Read the album art off disk once and hand the same bytes to every track
+
+        :return: the cover image as it sits in album_art
+        """
+        if self.cover_bytes is None:
+            with open(self.album_art, 'rb') as cover_img:
+                self.cover_bytes = cover_img.read()
+        return self.cover_bytes
+
     def write_id3_tags(self, filepath: str, meta: dict):
         """Write metadata to the MP3 file
 
@@ -343,9 +420,8 @@ class BandcampDownloader:
             audio.tags.add(USLT(encoding=3, lang='eng', desc='', text=meta['lyrics']))
 
         if self.config.embed_art and self.album_art:
-            with open(self.album_art, 'rb') as cover_img:
-                cover_bytes = cover_img.read()
-                audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes))
+            audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover',
+                                data=self.read_cover_bytes()))
 
         if self.config.embed_genres:
             audio.tags.add(TCON(encoding=3, text=meta['genres']))

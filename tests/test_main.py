@@ -1,11 +1,14 @@
 import pathlib
 import runpy
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 from bandcamp_dl import __version__
 from bandcamp_dl import __main__ as entry_point
+from bandcamp_dl import bandcamp as bandcamp_module
+from bandcamp_dl import bandcampdownloader as downloader_module
 from bandcamp_dl.bandcamp import Bandcamp
 from bandcamp_dl.bandcampdownloader import BandcampDownloader
 from bandcamp_dl import config as config_module
@@ -127,6 +130,33 @@ def test_without_a_url_or_an_artist_the_usage_is_printed(monkeypatch, capsys):
     assert "required: URL or --artist" in captured.err
 
 
+def test_one_http_session_serves_the_whole_run(downloaded, monkeypatch):
+    # Each album used to build its own session, so a discography paid for a fresh
+    # connection pool and an unshared rate limit per album
+    created = []
+
+    def count_sessions(limit_req_per_minute=0):
+        created.append(limit_req_per_minute)
+        return SimpleNamespace(name=f"session-{len(created)}")
+
+    monkeypatch.setattr(bandcamp_module, "make_session", count_sessions)
+    monkeypatch.setattr(downloader_module, "make_session", count_sessions)
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    kept = []
+
+    def record_start(self, album):
+        kept.append(self.session)
+        downloaded.append(album["url"])
+
+    monkeypatch.setattr(BandcampDownloader, "start", record_start)
+
+    run(monkeypatch, "https://a.bandcamp.com/album/first", "https://a.bandcamp.com/album/second")
+
+    assert len(created) == 1
+    assert len(kept) == 2 and kept[0].name == kept[1].name == "session-1"
+
+
 def test_a_track_slug_with_an_artist_downloads_that_one_track(downloaded, monkeypatch):
     monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
 
@@ -155,6 +185,31 @@ def test_an_artist_page_url_is_expanded_before_downloading(downloaded, monkeypat
     run(monkeypatch, "https://loopy.bandcamp.com/music")
 
     assert downloaded == ["https://loopy.bandcamp.com/album/one"]
+
+
+def test_an_artist_page_on_its_own_domain_is_expanded(downloaded, monkeypatch):
+    # The band behind music.loopy.example is loopy.bandcamp.com, and the domain url used
+    # to be dropped without a word
+    monkeypatch.setattr(Bandcamp, "resolve_band_name", lambda self, url: "loopy")
+    monkeypatch.setattr(Bandcamp, "get_full_discography",
+                        lambda self, name, page_type: [f"https://{name}.bandcamp.com/album/one"])
+    monkeypatch.setattr(Bandcamp, "parse", lambda self, url, *args: make_album(url))
+
+    run(monkeypatch, "https://music.loopy.example/music")
+
+    assert downloaded == ["https://loopy.bandcamp.com/album/one"]
+
+
+def test_an_artist_page_whose_band_cannot_be_found_fails_the_run(downloaded, monkeypatch, capsys):
+    monkeypatch.setattr(Bandcamp, "resolve_band_name", lambda self, url: None)
+
+    with pytest.raises(SystemExit) as exit_info:
+        run(monkeypatch, "https://music.loopy.example")
+
+    assert exit_info.value.code == 1
+    assert ("Could not work out which artist or label https://music.loopy.example belongs to"
+            in capsys.readouterr().out)
+    assert downloaded == []
 
 
 def test_a_url_that_is_not_an_album_or_a_track_is_left_alone(downloaded, monkeypatch):
