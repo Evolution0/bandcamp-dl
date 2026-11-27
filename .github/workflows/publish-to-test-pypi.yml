@@ -24,6 +24,16 @@ jobs:
       run: python -m coverage run -m pytest
     - name: Report coverage, fails under the configured floor
       run: python -m coverage report
+    - name: Write the XML report Codecov reads
+      run: python -m coverage xml
+    # this is the only suite run on a master push, so the number it uploads is the
+    # one the master coverage badge in README.rst reads
+    - name: Upload the coverage report to Codecov
+      uses: codecov/codecov-action@v7
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: coverage.xml
+        flags: master
 
   build:
     runs-on: ubuntu-latest

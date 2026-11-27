@@ -22,3 +22,12 @@ jobs:
       run: python -m coverage run -m pytest
     - name: Report coverage, fails under the configured floor
       run: python -m coverage report
+    - name: Write the XML report Codecov reads
+      run: python -m coverage xml
+    # this is the only suite run for a pull request, so the number it uploads is
+    # what Codecov shows for the PR; the badge in README.rst reads the master run
+    - name: Upload the coverage report to Codecov
+      uses: codecov/codecov-action@v7
+      with:
+        files: coverage.xml
+        flags: pull-request
