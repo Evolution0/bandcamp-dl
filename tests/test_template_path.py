@@ -108,6 +108,15 @@ def test_the_integer_ids_parse_publishes_survive_the_case_options():
     assert path_for(downloader, track(album_id=7, track_id=11), CASE_CAMEL) == "out/First-Mix/7/11.mp3"
 
 
+def test_a_cached_slug_cannot_leak_another_case_mode():
+    # The slug of a value is kept for the whole run, so the case mode is part of the key:
+    # one downloader asked twice must not answer the second call with the first result
+    downloader = make_downloader()
+
+    assert path_for(downloader, track(), CASE_LOWER).endswith("01 - one-two.mp3")
+    assert path_for(downloader, track(), CASE_UPPER).endswith("01 - ONE-TWO.mp3")
+
+
 def test_no_base_dir_still_ends_in_an_mp3_file():
     # base_dir None leaves the file in the current directory; only the directory part goes
     path = make_downloader(base_dir=None).template_to_path(track(), False, "-_~", "-", False,

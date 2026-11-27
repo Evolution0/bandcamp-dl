@@ -177,7 +177,12 @@ def main():
         logger.debug("Preparing download process..")
         download_failed = False
         for album in album_list:
-            bandcamp_downloader = BandcampDownloader(arguments, album['url'], debugging=arguments.debug)
+            # The parser's session carries the connection pool and the rate limiter, so
+            # building one downloader per album does not mean a fresh TLS handshake and
+            # an unthrottled pool per album
+            bandcamp_downloader = BandcampDownloader(arguments, album['url'],
+                                                     debugging=arguments.debug,
+                                                     session=bandcamp.session)
             logger.debug("Initiating download process..")
             if bandcamp_downloader.start(album) is False:
                 download_failed = True

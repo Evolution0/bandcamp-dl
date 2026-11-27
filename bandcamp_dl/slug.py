@@ -19,11 +19,32 @@ punctuation at either end:
 """
 import re
 import unicodedata
+from functools import lru_cache
 
 from slugify import slugify
 
 # The default allow-list, mirrored from config.OK_CHARS
 SLUG_OK = '-_~'
+
+
+@lru_cache(maxsize=8)
+def _separator_pattern(space_replacement: str) -> re.Pattern:
+    """The pattern that collapses a run of separators, built once per separator char
+
+    :param space_replacement: the character standing in for a space
+    :return: a compiled pattern matching any run of that char or of whitespace
+    """
+    return re.compile(rf'[{re.escape(space_replacement)}\s]+')
+
+
+@lru_cache(maxsize=8)
+def _allowed_pattern(allowed: str) -> re.Pattern:
+    """The pattern that drops everything outside an allow-list, built once per allow-list
+
+    :param allowed: the characters that survive the filter
+    :return: a compiled pattern matching everything else
+    """
+    return re.compile(rf'[^\w{re.escape(allowed)}]+')
 
 
 def _sanitize(text: str, ok: str) -> str:
@@ -71,7 +92,7 @@ def slugify_name(text: str, ok: str = SLUG_OK, only_ascii: bool = False, spaces:
             space_replacement = ok[0] if ok else ''
         # Collapsing is done here rather than left to the library because a dash the
         # user allowed in --ok-chars is an ordinary character, not a separator to fold
-        core = re.sub(rf'[{re.escape(space_replacement)}\s]+', space_replacement, core)
+        core = _separator_pattern(space_replacement).sub(space_replacement, core)
         allowed = ok + space_replacement
     else:
         allowed = ok + ' '
@@ -88,7 +109,7 @@ def slugify_name(text: str, ok: str = SLUG_OK, only_ascii: bool = False, spaces:
         separator='-',
         # Everything outside the allow-list has been filtered out already, so this
         # only catches what the transliteration of --ascii-only invents
-        regex_pattern=rf'[^\w{re.escape(allowed)}]+',
+        regex_pattern=_allowed_pattern(allowed),
     ).strip()
     # The strip is not redundant: a transliteration can leave whitespace at either
     # end ('、' becomes " ", a full width comma) where the old library re-filtered

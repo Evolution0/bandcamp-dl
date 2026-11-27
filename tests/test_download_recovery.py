@@ -6,7 +6,7 @@ import responses
 from mutagen.id3 import ID3
 
 from bandcamp_dl import __version__
-from bandcamp_dl.bandcampdownloader import BandcampDownloader
+from bandcamp_dl.bandcampdownloader import BandcampDownloader, DOWNLOAD_CHUNK_SIZE
 
 TRACK_URL = "https://t4.bcbits.com/stream/abc/mp3-128/1"
 # 20 silent MPEG-1 Layer III frames (128 kbps, 44.1 kHz, 417 bytes each)
@@ -131,6 +131,32 @@ def test_a_completed_run_clears_the_unfinished_marker(tmp_path):
     make_downloader(tmp_path).download_album(ALBUM)
 
     assert not marker.exists()
+
+
+class RecordingStream:
+    """A body that reports the chunk size it was asked to be read in"""
+
+    ok = True
+    headers = {"content-length": str(len(MP3_BYTES))}
+
+    def __init__(self):
+        self.chunk_sizes = []
+
+    def iter_content(self, chunk_size):
+        self.chunk_sizes.append(chunk_size)
+        yield MP3_BYTES
+
+
+def test_a_download_is_read_in_one_fixed_chunk_size(tmp_path):
+    # One hundredth of the file used to be the chunk size, so a large track arrived in
+    # megabyte reads and a small one in tiny ones, each with its own progress redraw
+    downloader = make_downloader(tmp_path)
+    stream = RecordingStream()
+    downloader.session = StubbornSession(stream)
+
+    assert downloader.download_album(ALBUM) is True
+
+    assert stream.chunk_sizes == [DOWNLOAD_CHUNK_SIZE]
 
 
 def test_a_tmp_file_the_os_will_not_rename_back_is_reported(tmp_path, monkeypatch, caplog):

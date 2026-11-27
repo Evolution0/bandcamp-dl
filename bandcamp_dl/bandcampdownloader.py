@@ -11,19 +11,30 @@ from bandcamp_dl.slug import slugify_name
 from bandcamp_dl.progress import make_progress
 from bandcamp_dl.session import make_session
 
+# A release name is slugified once per track otherwise; the album, artist, date, label and
+# album_id tokens carry the same value for every track of an album
+_CAMEL_CASE = re.compile(r'(((?<=\s)|^|-)[a-z])')
+# The old chunk size was one hundredth of the whole file, so a 3-minute mp3 arrived in
+# ~20 kB reads and a large one in ~1 MB reads; a fixed size keeps both sane and means far
+# fewer progress redraws for the big files.
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
+
 
 class BandcampDownloader:
-    def __init__(self, config, urls=None, debugging: bool = False):
+    def __init__(self, config, urls=None, debugging: bool = False, session=None):
         """Initialize variables we will need throughout the Class
 
         :param config: user config/args
         :param urls: list of urls
         :param debugging: toggle verbose logging
+        :param session: a requests session to download through; the CLI hands it the
+                       parser's own session so one connection pool and one rate limit
+                       cover the whole run instead of being rebuilt per album
         """
         self.headers = {'User-Agent': f'bandcamp-dl/{__version__} '
                         f'(https://github.com/evolution0/bandcamp-dl)'}
 
-        self.session = make_session(config.limit_req_per_minute)
+        self.session = session or make_session(config.limit_req_per_minute)
 
         self.logger = logging.getLogger("bandcamp-dl").getChild("Downloader")
         # Debug chatter only: warnings and errors should still show without --debug,
@@ -37,6 +48,10 @@ class BandcampDownloader:
         self.urls = urls
 
         self.album_art = None
+        # The cover is read once per album and reused for every track that embeds it
+        self.cover_bytes = None
+        # Slugified path components, keyed by the value that produced them
+        self.slug_cache = {}
 
     def start(self, album: dict) -> bool | None:
         """Start album download process
@@ -76,17 +91,23 @@ class BandcampDownloader:
         self.logger.debug(f"\n\tTemplate: {path}")
 
         def slugify_preset(content):
-            # album_id and track_id reach the tokens as ints from parse(), and the case options
-            # below are string operations, so whatever a token carries becomes text first
+            # album_id and track_id reach the tokens as ints from parse(), and the case
+            # options below are string operations, so whatever a token carries becomes
+            # text first
             content = str(content)
+            cache_key = (content, case_mode, ok_chars, ascii_only, keep_space, space_char)
+            slugged = self.slug_cache.get(cache_key)
+            if slugged is not None:
+                return slugged
             retain_case = case_mode != CASE_LOWER
             if case_mode == CASE_UPPER:
                 content = content.upper()
             if case_mode == CASE_CAMEL:
-                content = re.sub(r'(((?<=\s)|^|-)[a-z])', lambda x: x.group().upper(), content.lower())
+                content = _CAMEL_CASE.sub(lambda x: x.group().upper(), content.lower())
             slugged = slugify_name(content, ok=ok_chars, only_ascii=ascii_only,
                                    spaces=keep_space, lower=not retain_case,
                                    space_replacement=space_char)
+            self.slug_cache[cache_key] = slugged
             return slugged
 
         template_tokens = ['trackartist', 'artist', 'album', 'title', 'date', 'label', 'track', 'album_id', 'track_id']
@@ -237,7 +258,6 @@ class BandcampDownloader:
                 try:
                     r = self.session.get(track['url'], headers=self.headers, stream=True)
                     file_length = int(r.headers.get('content-length', 0))
-                    total = int(file_length / 100)
                     if not r.ok:
                         # Never save an error page as audio, mutagen can't read it
                         print(f"{filename[:-4]} failed with HTTP {r.status_code}, retrying..")
@@ -257,7 +277,7 @@ class BandcampDownloader:
                         self.progress.downloading(file_length)
                         with open(filepath, "wb") as f:
                             dl = 0
-                            for data in r.iter_content(chunk_size=total or 8192):
+                            for data in r.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                                 dl += len(data)
                                 f.write(data)
                                 self.progress.advance(dl)
@@ -319,6 +339,16 @@ class BandcampDownloader:
         except OSError as e:
             self.logger.warning(f"Could not restore {filepath} to {filepath[:-4]}: {e}")
 
+    def read_cover_bytes(self) -> bytes:
+        """Read the album art off disk once and hand the same bytes to every track
+
+        :return: the cover image as it sits in album_art
+        """
+        if self.cover_bytes is None:
+            with open(self.album_art, 'rb') as cover_img:
+                self.cover_bytes = cover_img.read()
+        return self.cover_bytes
+
     def write_id3_tags(self, filepath: str, meta: dict):
         """Write metadata to the MP3 file
 
@@ -343,9 +373,8 @@ class BandcampDownloader:
             audio.tags.add(USLT(encoding=3, lang='eng', desc='', text=meta['lyrics']))
 
         if self.config.embed_art and self.album_art:
-            with open(self.album_art, 'rb') as cover_img:
-                cover_bytes = cover_img.read()
-                audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=cover_bytes))
+            audio.tags.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover',
+                                data=self.read_cover_bytes()))
 
         if self.config.embed_genres:
             audio.tags.add(TCON(encoding=3, text=meta['genres']))

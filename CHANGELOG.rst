@@ -84,3 +84,23 @@ Unreleased
   the options and so never needs filtering out on the way to the file. Two
   startup lines changed: "Config dir exists." now says "Config file exists."
   and opening the file no longer names the mode it was opened in.
+- [Enhancement] A run now shares one HTTP session between the parser and every
+  album's downloader: one connection pool, one rate limit and one TLS handshake
+  set instead of a fresh set per album.
+- [Enhancement] The HTML parser BeautifulSoup should use is chosen once per run.
+  Without ``lxml`` installed, every page used to pay a failed ``lxml`` attempt
+  before falling back to the built-in parser.
+- [Enhancement] Tracks whose album page reports ``has_lyrics`` as false are
+  no longer fetched one page per track for lyrics that were then dropped; an
+  album without lyrics costs no extra requests with ``--embed-lyrics``.
+- [Enhancement] Path components are slugified once per distinct value rather than
+  once per track, the cover image is read once per album instead of once per
+  tagged track, downloads arrive in a fixed 64 KiB chunk instead of a hundredth
+  of the file, and the plain progress display asks for the terminal width once
+  per track instead of once per chunk.
+- [Bugfix] A track the page says carries lyrics no longer raises ``KeyError``
+  when ``--embed-lyrics`` was not asked for.
+- [Note] The artist page scraping no longer reaches the label page fallback through
+  an ``AttributeError``, and a ``data-client-items`` attribute is read as JSON
+  instead of being parsed as HTML first. Neither changes which urls end up in
+  the queue.

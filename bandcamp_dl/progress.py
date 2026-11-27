@@ -36,9 +36,13 @@ def is_rtl(text: str) -> bool:
     return any(unicodedata.bidirectional(c) in ("R", "AL") for c in text)
 
 
-def print_clean(msg):
-    terminal_size = shutil.get_terminal_size()
-    print(f'{msg}{" " * (int(terminal_size[0]) - len(msg))}', end='')
+def print_clean(msg, width: int):
+    """Erase what a longer line left behind by padding the new one to the window width
+
+    :param msg: the line to print without a newline
+    :param width: the terminal width the padding is measured against
+    """
+    print(f'{msg}{" " * (width - len(msg))}', end='')
 
 
 class StatusColumn(SpinnerColumn):
@@ -175,6 +179,9 @@ class PlainProgress:
         self.track_num = 0
         self.filename = ""
         self.size = 0
+        # The terminal width is stable within a track: asking per progress step costs
+        # an environment lookup and a COLUMNS check thousands of times per album
+        self.width = 0
 
     def __enter__(self):
         return self
@@ -188,6 +195,7 @@ class PlainProgress:
     def track(self, index: int, filename: str):
         self.track_num = index + 1
         self.filename = filename
+        self.width = shutil.get_terminal_size().columns
 
     def downloading(self, size: int):
         self.size = size
@@ -197,17 +205,17 @@ class PlainProgress:
             done = int(50 * downloaded / self.size)
             print_clean(f'\r({self.track_num}/{self.num_tracks}) '
                         f'[{"=" * done}{" " * (50 - done)}] :: '
-                        f'Downloading: {self.filename[:-8]}')
+                        f'Downloading: {self.filename[:-8]}', self.width)
 
     def tagging(self):
         if not self.debug:
             print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] '
-                        f':: Encoding: {self.filename[:-8]}')
+                        f':: Encoding: {self.filename[:-8]}', self.width)
 
     def finished(self, size: int):
         if not self.debug:
             print_clean(f'\r({self.track_num}/{self.num_tracks}) [{"=" * 50}] '
-                        f':: Finished: {self.filename[:-8]}')
+                        f':: Finished: {self.filename[:-8]}', self.width)
 
     def skipped(self):
         print(f"File: {self.filename[:-4]} already exists and is complete, skipping..")

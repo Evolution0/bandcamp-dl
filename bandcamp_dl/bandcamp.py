@@ -7,6 +7,7 @@ import time
 
 import bs4
 import requests
+from functools import lru_cache
 from urllib.parse import urlparse, urljoin
 
 from bandcamp_dl import __version__
@@ -17,6 +18,32 @@ MOBILE_API = "https://bandcamp.com/api/mobile/24"
 SEARCH_API = "https://bandcamp.com/api/bcsearch_public_api/1/autocomplete_elastic"
 API_RETRIES = 5
 PAGE_RETRIES = 5
+
+
+@lru_cache(maxsize=1)
+def soup_builder() -> str:
+    """Pick the markup parser BeautifulSoup should use, once per run
+
+    lxml is not a dependency, so installs without it fell back to html.parser by
+    raising out of every single parse: each page paid for a wasted lxml attempt.
+
+    :return: the parser name every make_soup call uses
+    """
+    try:
+        bs4.BeautifulSoup("<p>x</p>", "lxml")
+    except bs4.FeatureNotFound:
+        return "html.parser"
+    return "lxml"
+
+
+def make_soup(markup: str) -> bs4.BeautifulSoup:
+    """Parse markup with the parser this install has, without re-probing it
+
+    :param markup: the raw page or fragment
+    :return: the parsed document
+    """
+    return bs4.BeautifulSoup(markup, soup_builder())
+
 
 class Bandcamp:
     """Core parsing logic"""
@@ -70,10 +97,7 @@ class Bandcamp:
             sys.exit(2)
 
 
-        try:
-            self.soup = bs4.BeautifulSoup(response.text, "lxml")
-        except bs4.FeatureNotFound:
-            self.soup = bs4.BeautifulSoup(response.text, "html.parser")
+        self.soup = make_soup(response.text)
 
         self.logger.debug(" Generating BandcampJSON..")
         bandcamp_json = BandcampJSON(self.soup, self.debugging).generate()
@@ -84,6 +108,13 @@ class Bandcamp:
 
         self.logger.debug(" Generating Album..")
         self.tracks = page_json['trackinfo']
+
+        # Both the re-numbering below and the last loop need the band's own url: every
+        # title_link in trackinfo is relative to it
+        if "/track/" in page_json['url']:
+            artist_url = page_json['url'].rpartition('/track/')[0]
+        else:
+            artist_url = page_json['url'].rpartition('/album/')[0]
 
         track_ids = {}
         if 'track' in page_json and 'itemListElement' in page_json['track']:
@@ -107,18 +138,13 @@ class Bandcamp:
                     position = item['position']
                     track_positions[track_url] = position
 
-            if "/track/" in page_json['url']:
-                artist_url = page_json['url'].rpartition('/track/')[0]
-            else:
-                artist_url = page_json['url'].rpartition('/album/')[0]
-
-            for track in self.tracks:
+            for index, track in enumerate(self.tracks):
                 full_track_url = f"{artist_url}{track['title_link']}"
                 if full_track_url in track_positions:
                     track['track_num'] = track_positions[full_track_url]
                 else:
                     self.logger.debug(f" Could not find position for track: {full_track_url}")
-                    track['track_num'] = self.tracks.index(track) + 1
+                    track['track_num'] = index + 1
         
         album_release = page_json['album_release_date']
         if album_release is None:
@@ -164,7 +190,7 @@ class Bandcamp:
             "title": album_title,
             "artist": page_json['artist'],
             "label": label,
-            "full": False,
+            "full": True,
             "art": "",
             "date": str(datetime.datetime.strptime(album_release, "%d %b %Y %H:%M:%S GMT").year),
             "url": url,
@@ -172,27 +198,27 @@ class Bandcamp:
             "album_id": album_id
         }
 
-        if "/track/" in page_json['url']:
-            artist_url = page_json['url'].rpartition('/track/')[0]
-        else:
-            artist_url = page_json['url'].rpartition('/album/')[0]
-
         for track in self.tracks:
-            full_track_url = f"{artist_url}{track['title_link']}"
             if track_id_from_music_recording:
                 track['track_id'] = track_id_from_music_recording
             else:
-                track['track_id'] = track_ids.get(full_track_url)
+                track['track_id'] = track_ids.get(f"{artist_url}{track['title_link']}")
 
-            if lyrics:
-                track['lyrics'] = self.get_track_lyrics(f"{artist_url}"
-                                                        f"{track['title_link']}#lyrics")
+            if lyrics and track.get('has_lyrics') is not False:
+                # The album page already says which tracks carry lyrics: a release
+                # without any used to cost one extra page fetch per track, and
+                # get_track_metadata dropped those lyrics again anyway
+                track['lyrics'] = self.get_track_lyrics(
+                    f"{artist_url}{track['title_link']}#lyrics")
 
             if track['file'] is not None:
                 track = self.get_track_metadata(track)
                 album['tracks'].append(track)
+            else:
+                # This loop has already looked at every track's file, so the album's
+                # completeness is settled here; all_tracks_available would rescan them
+                album['full'] = False
 
-        album['full'] = self.all_tracks_available()
         if art:
             album['art'] = self.get_album_art(cover_quality)
         if genres:
@@ -227,10 +253,7 @@ class Bandcamp:
     def get_track_lyrics(self, track_url):
         self.logger.debug(" Fetching track lyrics..")
         track_page = self.get_page(track_url)
-        try:
-            track_soup = bs4.BeautifulSoup(track_page.text, "lxml")
-        except bs4.FeatureNotFound:
-            track_soup = bs4.BeautifulSoup(track_page.text, "html.parser")
+        track_soup = make_soup(track_page.text)
         track_lyrics = track_soup.find("div", {"class": "lyricsText"})
         if track_lyrics:
             self.logger.debug(" Lyrics retrieved..")
@@ -274,7 +297,9 @@ class Bandcamp:
             track_metadata['url'] = None
 
         if track['has_lyrics'] is not False:
-            if track['lyrics'] is not None:
+            # parse() only writes the key when it fetched lyrics, which is when they were
+            # asked for; a release that advertises lyrics gets here without the key
+            if track.get('lyrics') is not None:
                 track_metadata['lyrics'] = track['lyrics'].replace('\\r\\n', '\n')
 
         self.logger.debug(" Track metadata generated..")
@@ -339,25 +364,20 @@ class Bandcamp:
             print(f"Could not fetch {music_page_url}: HTTP {response.status_code}")
             sys.exit(2)
 
-        try:
-            soup = bs4.BeautifulSoup(response.text, "lxml")
-        except bs4.FeatureNotFound:
-            soup = bs4.BeautifulSoup(response.text, "html.parser")
+        soup = make_soup(response.text)
 
         music_grid = soup.find('ol', {'id': 'music-grid'})
-        if not music_grid:
-            self.logger.warning("Could not find music grid on the page. No albums found.")
-
-        try:
+        if music_grid:
             if 'data-client-items' in music_grid.attrs:
                 self.logger.debug("Found data-client-items attribute. Parsing for album URLs.")
                 try:
-                    json_string = bs4.BeautifulSoup(music_grid['data-client-items'], "html.parser").text
-                    items = json.loads(json_string)
+                    # bs4 hands back attribute values already unescaped, so this is one
+                    # json.loads away; wrapping the list in a second soup used to parse
+                    # the whole discography as HTML just to read it back out
+                    items = json.loads(music_grid['data-client-items'])
                     for item in items:
                         if 'page_url' in item:
-                            full_url = urljoin(music_page_url, item['page_url'])
-                            album_urls.add(full_url)
+                            album_urls.add(urljoin(music_page_url, item['page_url']))
                 except (json.JSONDecodeError, TypeError) as e:
                     self.logger.error(f"Failed to parse data-client-items JSON: {e}")
             # Releases can be listed as grid links, in data-client-items, or both
@@ -366,25 +386,25 @@ class Bandcamp:
                 href = a.get('href')
                 if href:
                     album_urls.add(urljoin(music_page_url, href))
-        except AttributeError:
-            # This is slow for some reason, needs work
+        else:
+            self.logger.warning("Could not find music grid on the page. No albums found.")
+            # A label page has no music grid, so its bands are scraped out of the label
+            # cells; this used to be reached by letting the missing grid raise an
+            # AttributeError through the grid block above. The label lookup is a second
+            # CSS pass over the whole document, which is what makes it the slow branch.
             self.logger.warning("Retrying as a Label page.")
-            is_label = soup.find('script', {'id': 'band-menuitem-template'})
-            if is_label:
-                music_grid = soup.select('div.ipCellLabel1 a')
-                for a in music_grid:
-                    href = a.get('href')
-                    if href:
-                        # Only need this for truncated links, some are already complete so first verify.
-                        if urlparse(href).scheme in ('http', 'https'):
-                            # Apparently artists that are deleted/disabled have these modified links?
-                            if '-disabled-' not in href:
-                                album_urls.add(href)
-                        else:
-                            full_url = urljoin(music_page_url, href)
-                            album_urls.add(full_url)
-            else:
+            if not soup.find('script', {'id': 'band-menuitem-template'}):
                 return []
+            for a in soup.select('div.ipCellLabel1 a'):
+                href = a.get('href')
+                if href:
+                    # Only need urljoin for truncated links, some are already complete
+                    if urlparse(href).scheme in ('http', 'https'):
+                        # Artists that are deleted or disabled carry these mangled links
+                        if '-disabled-' not in href:
+                            album_urls.add(href)
+                    else:
+                        album_urls.add(urljoin(music_page_url, href))
         self.logger.info(f"Found a total of {len(album_urls)} unique album/track links.")
         return list(album_urls)
 
@@ -518,10 +538,7 @@ class Bandcamp:
 
     def get_playlist(self, playlist_url: str) -> list:
         playlist = self.get_page(playlist_url)
-        try:
-            playlist_soup = bs4.BeautifulSoup(playlist.text, "lxml")
-        except bs4.FeatureNotFound:
-            playlist_soup = bs4.BeautifulSoup(playlist.text, "html.parser")
+        playlist_soup = make_soup(playlist.text)
         self.logger.debug(" Generating playlist JSON..")
         playlist = BandcampJSON(playlist_soup, self.debugging, 'playlist').generate()
         playlist_json = json.loads(playlist)
